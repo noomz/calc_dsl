@@ -1,0 +1,9 @@
+{
+  "name": "calc_dsl",
+  "version": "1.0.0",
+  "main": "index.js",
+  "license": "MIT",
+  "devDependencies": {
+    "@anthropic-ai/claude-code": "^0.2.57"
+  }
+}

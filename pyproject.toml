@@ -1,0 +1,36 @@
+[tool.poetry]
+name = "calc_dsl"
+version = "0.1.0"
+description = "A calculator domain-specific language with support for time calculations, unit conversions, and natural language math operations"
+authors = ["Your Name <your.email@example.com>"]
+readme = "README.md"
+
+[tool.poetry.dependencies]
+python = ">=3.9,<3.14"
+flask = "^2.3.3"
+pint = "^0.22"
+# readline is typically built into Python on Unix systems
+pyreadline3 = {version = "^3.4.1", markers = "platform_system == 'Windows'"}
+
+[tool.poetry.group.dev.dependencies]
+pytest = "^7.4.0"
+black = "^23.7.0"
+isort = "^5.12.0"
+flake8 = "^6.1.0"
+mypy = "^1.5.1"
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"
+
+[tool.black]
+line-length = 88
+target-version = ["py38"]
+
+[tool.isort]
+profile = "black"
+line_length = 88
+
+[tool.poetry.scripts]
+server = "calc_dsl.app:start_web_server"
+calc = "calc_dsl.app:start_cli_mode"

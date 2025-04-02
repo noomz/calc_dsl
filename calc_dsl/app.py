@@ -667,7 +667,9 @@ def get_session_vars(session_id):
     """Retrieves the variables for a given session."""
     variables = load_session(session_id)
     if variables is not None:
-        return jsonify(variables), 200
+        # Filter out internal variables (those starting with underscore)
+        public_vars = {k: v for k, v in variables.items() if not k.startswith('_')}
+        return jsonify(public_vars), 200
     else:
         return (
             jsonify({"error": f"Session '{session_id}' not found or failed to load"}),
@@ -725,13 +727,100 @@ def calculate_in_session(session_id):
                 ),
                 400,
             )
+            
+        # Handle direct number assignment like "x = 10"
+        try:
+            # Try to interpret as a direct number
+            direct_value = float(expression_body)
+            # If it's a whole number, convert to int
+            if direct_value == int(direct_value):
+                direct_value = int(direct_value)
+            # Store and return the result
+            variables[variable_name] = direct_value
+            save_session(session_id, variables)
+            return jsonify({"variable_set": variable_name, "result": direct_value}), 200
+        except ValueError:
+            # Not a direct number, continue with other checks
+            pass
+            
+        # Special handling for unit conversion assignments (e.g., "x = 10km to mi")
+        # First check if it's a unit conversion format
+        unit_match = UnitCalculator.unit_pattern.match(expression_body)
+        if unit_match:
+            value_str, from_unit, to_unit = (
+                unit_match.group(1),
+                unit_match.group(2).strip(),
+                unit_match.group(3).strip(),
+            )
+            try:
+                value = float(value_str)
+                # Perform the conversion
+                calculator = UnitCalculator()
+                result, error = calculator.parse(expression_body)
+                if error:
+                    return jsonify({"error": error}), 400
+                if result is not None:
+                    # Store both the string result with units and the numeric value
+                    variables[variable_name] = result
+                    # Extract numeric part for later calculations
+                    try:
+                        value_str = str(result).split(' ', 1)[0]
+                        numeric_value = float(value_str)
+                        variables[f"_{variable_name}_value"] = numeric_value
+                    except (ValueError, IndexError):
+                        pass
+                    # Save to the session
+                    save_session(session_id, variables)
+                    return jsonify({"variable_set": variable_name, "result": result}), 200
+            except (ValueError, UndefinedUnitError) as e:
+                # Not a valid unit conversion, continue with normal evaluation
+                pass
+                
         # Substitute variables *only in the expression part*
         expression_to_evaluate = substitute_variables(expression_body, variables)
         logger.info(
             f"Session {session_id}: Assignment detected for '{variable_name}'. Evaluating: '{expression_to_evaluate}'"
         )
     else:
-        # Substitute variables in the whole query
+        # Check for operations with unit-based variables (e.g., "x * 3" where x contains units)
+        # Patterns like "x * 3", "x / 2", "x + 10", etc.
+        unit_op_match = re.match(r'^\s*([a-zA-Z_][a-zA-Z0-9_]*)\s*([\+\-\*\/])\s*(-?[\d\.]+)\s*$', query)
+        if unit_op_match:
+            var_name = unit_op_match.group(1)
+            operator = unit_op_match.group(2)
+            try:
+                number = float(unit_op_match.group(3))
+                
+                # Check if variable exists and if we have a hidden numeric value for it
+                if var_name in variables:
+                    hidden_value_key = f"_{var_name}_value"
+                    if hidden_value_key in variables:
+                        numeric_val = variables[hidden_value_key]
+                        
+                        # Perform the operation
+                        result_val = None
+                        if operator == '+':
+                            result_val = numeric_val + number
+                        elif operator == '-':
+                            result_val = numeric_val - number
+                        elif operator == '*':
+                            result_val = numeric_val * number
+                        elif operator == '/':
+                            if number == 0:
+                                return jsonify({"error": "Division by zero"}), 400
+                            result_val = numeric_val / number
+                        
+                        # If the original variable had units, preserve them
+                        if isinstance(variables[var_name], str) and ' ' in variables[var_name]:
+                            _, unit = variables[var_name].split(' ', 1)
+                            return jsonify({"result": f"{result_val} {unit}"}), 200
+                        else:
+                            return jsonify({"result": result_val}), 200
+            except ValueError:
+                # If any conversion fails, continue with normal processing
+                pass
+        
+        # Regular expression with variable substitution
         expression_to_evaluate = substitute_variables(query, variables)
         logger.info(
             f"Session {session_id}: Evaluating expression: '{expression_to_evaluate}' (Original: '{query}')"
@@ -782,9 +871,22 @@ def calculate_in_session(session_id):
     elif calculated_result is not None:
         # Evaluation succeeded
         if is_assignment:
-            # Update session variables
+            # Store the result, preserving both numeric value and formatted display
             variables[variable_name] = calculated_result
+            
+            # Also store a numeric version if it's a unit result
+            if isinstance(calculated_result, str) and ' ' in calculated_result:
+                try:
+                    # Try to extract numeric part for calculations
+                    value_str = calculated_result.split(' ', 1)[0]
+                    numeric_value = float(value_str)
+                    variables[f"_{variable_name}_value"] = numeric_value
+                except (ValueError, IndexError):
+                    pass
+                    
+            # Save to database if we have a session
             save_session(session_id, variables)
+            
             # Return the assigned value
             return (
                 jsonify({"variable_set": variable_name, "result": calculated_result}),
@@ -811,185 +913,6 @@ def calculate_in_session(session_id):
 # --- CLI Interface ---
 def run_cli_mode():
     """Run calculator in interactive CLI mode."""
-    import cmd
-    import argparse
-    
-    class CalculatorShell(cmd.Cmd):
-        intro = "Calculator DSL Shell - Type 'help' for command list, 'exit' to quit"
-        prompt = "calc> "
-        
-        def __init__(self):
-            super().__init__()
-            # Create a session when the shell starts
-            self.session_id = create_session_db()
-            if self.session_id:
-                print(f"Started new session: {self.session_id}")
-                self.variables = {}
-            else:
-                print("Failed to create session. Starting with empty session.")
-                self.session_id = None
-                self.variables = {}
-        
-        def default(self, line):
-            """Process calculation when no specific command matches."""
-            if line.lower() in ('exit', 'quit', 'bye'):
-                return self.do_exit(line)
-                
-            # Process the input as a calculation
-            self._calculate(line)
-            return False  # Don't stop the command loop
-            
-        def _calculate(self, query):
-            """Process a calculation query."""
-            if not query.strip():
-                return
-                
-            if self.session_id:
-                # Use the API endpoint logic but directly call with variables
-                # Check for assignment
-                assignment_match = ASSIGNMENT_PATTERN.match(query)
-                is_assignment = assignment_match is not None
-                variable_name = None
-                expression_to_evaluate = query
-
-                if is_assignment:
-                    variable_name = assignment_match.group(1)
-                    expression_body = assignment_match.group(2).strip()
-                    if not expression_body:
-                        print("Error: Assignment requires an expression (e.g., x = 1 + 1)")
-                        return
-                    
-                    # Substitute variables in the expression part
-                    expression_to_evaluate = substitute_variables(expression_body, self.variables)
-                else:
-                    # Substitute variables in the whole query
-                    expression_to_evaluate = substitute_variables(query, self.variables)
-
-                # Evaluate the expression using calculators
-                calculated_result = None
-                evaluation_error = None
-
-                # Iterate through registered calculators
-                for calculator in REGISTERED_CALCULATORS:
-                    try:
-                        result, error = calculator.parse(expression_to_evaluate)
-
-                        if error:
-                            # Calculator recognized format but failed internally
-                            evaluation_error = error
-                            break
-                        elif result is not None:
-                            # Calculator successfully parsed and returned a result
-                            calculated_result = result
-                            break
-
-                    except Exception as e:
-                        evaluation_error = f"An unexpected error occurred: {e}"
-                        break
-
-                # Handle results
-                if evaluation_error:
-                    print(f"Error: {evaluation_error}")
-                elif calculated_result is not None:
-                    if is_assignment:
-                        # Update variables
-                        self.variables[variable_name] = calculated_result
-                        print(f"{variable_name} = {calculated_result}")
-                        
-                        # Save to database if we have a session
-                        if self.session_id:
-                            save_session(self.session_id, self.variables)
-                    else:
-                        print(f"Result: {calculated_result}")
-                else:
-                    print(f"Error: Could not understand or parse expression: '{expression_to_evaluate}'")
-            else:
-                # No session, simpler calculation without variables
-                for calculator in REGISTERED_CALCULATORS:
-                    result, error = calculator.parse(query)
-                    if error:
-                        print(f"Error: {error}")
-                        return
-                    elif result is not None:
-                        print(f"Result: {result}")
-                        return
-                print(f"Error: Could not understand or parse expression: '{query}'")
-        
-        def do_vars(self, arg):
-            """Display all variables in the current session."""
-            if not self.variables:
-                print("No variables defined.")
-            else:
-                print("Current variables:")
-                for name, value in self.variables.items():
-                    print(f"  {name} = {value}")
-        
-        def do_help(self, arg):
-            """Show help information."""
-            if not arg:
-                print("\nAvailable commands:")
-                print("  vars            - Display all defined variables")
-                print("  help            - Show this help message")
-                print("  exit/quit       - Exit the calculator")
-                print("\nCalculation examples:")
-                print("  2 + 3           - Basic arithmetic")
-                print("  x = 10          - Assign a variable")
-                print("  9am - 5pm       - Calculate time difference")
-                print("  5 km to miles   - Convert units")
-                print("  3 power of 2    - Use natural language math")
-                print("  square root of 16 - Use more complex expressions")
-                print("  2% of 100       - Calculate percentages")
-            else:
-                cmd.Cmd.do_help(self, arg)
-        
-        def do_exit(self, arg):
-            """Exit the calculator CLI."""
-            print("Thank you for using Calculator DSL!")
-            return True
-            
-        # Aliases for exit
-        do_quit = do_exit
-        do_bye = do_exit
-    
-    # Parse command line arguments
-    parser = argparse.ArgumentParser(description='Calculator DSL')
-    parser.add_argument('--web', action='store_true', help='Run in web server mode (default: CLI mode)')
-    parser.add_argument('--port', type=int, default=5200, help='Port to run web server on (default: 5200)')
-    parser.add_argument('expression', nargs='?', help='Expression to calculate (optional)')
-    
-    args = parser.parse_args()
-    
-    # Initialize the database
-    init_db()
-    
-    if args.expression:
-        # One-time calculation mode
-        shell = CalculatorShell()
-        shell._calculate(args.expression)
-    elif not args.web:
-        # Interactive CLI mode
-        shell = CalculatorShell()
-        try:
-            shell.cmdloop()
-        except KeyboardInterrupt:
-            print("\nKeyboard interrupt received. Exiting...")
-    else:
-        # Web server mode handled by main()
-        return False
-        
-    return True
-
-# --- Entry Points ---
-def start_web_server():
-    """Entry point for running the web server."""
-    print("Initializing database...")
-    init_db()  # Ensure database exists and table is created on startup
-    
-    print("Starting web server on http://0.0.0.0:5200")
-    app.run(host="0.0.0.0", port=5200)
-
-def start_cli_mode():
-    """Entry point for running the CLI mode with a simple infinite prompt."""
     import os
     import argparse
     
@@ -1026,7 +949,7 @@ def start_cli_mode():
                 cmd, partial_var = text.split(' ', 1)
                 if cmd.lower() == 'print':
                     # Complete variable names
-                    matching_vars = [f"print {v}" for v in variables.keys() if v.startswith(partial_var)]
+                    matching_vars = [f"print {v}" for v in variables.keys() if v.startswith(partial_var) and not v.startswith('_')]
                     if state < len(matching_vars):
                         return matching_vars[state]
                     return None
@@ -1112,7 +1035,9 @@ def start_cli_mode():
                     else:
                         print("Current variables:")
                         for name, value in variables.items():
-                            print(f"  {name} = {value}")
+                            # Skip internal/hidden variables (those starting with underscore)
+                            if not name.startswith('_'):
+                                print(f"  {name} = {value}")
                     continue
                 
                 # Check for print variable command (e.g., "?x" or "print x")
@@ -1179,10 +1104,79 @@ def start_cli_mode():
                         # Not a direct number, continue with normal evaluation
                         pass
                     
+                    # Special handling for unit conversion assignments (e.g., "x = 10km to mi")
+                    # First check if it's a unit conversion format
+                    unit_match = UnitCalculator.unit_pattern.match(expression_body)
+                    if unit_match:
+                        value_str, from_unit, to_unit = (
+                            unit_match.group(1),
+                            unit_match.group(2).strip(),
+                            unit_match.group(3).strip(),
+                        )
+                        try:
+                            value = float(value_str)
+                            # Perform the conversion
+                            calculator = UnitCalculator()
+                            result, error = calculator.parse(expression_body)
+                            if error:
+                                print(f"Error: {error}")
+                                continue
+                            if result is not None:
+                                # Store both the string result with units and the numeric value
+                                variables[variable_name] = result
+                                # Extract numeric part for later calculations
+                                try:
+                                    value_str = str(result).split(' ', 1)[0]
+                                    numeric_value = float(value_str)
+                                    variables[f"_{variable_name}_value"] = numeric_value
+                                except (ValueError, IndexError):
+                                    pass
+                                if session_id:
+                                    save_session(session_id, variables)
+                                print(f"{variable_name} = {result}")
+                                continue
+                        except (ValueError, UndefinedUnitError):
+                            # Not a unit conversion or error in conversion, continue with normal evaluation
+                            pass
+                    
                     # Substitute variables in the expression part
                     expression_to_evaluate = substitute_variables(expression_body, variables)
                 else:
-                    # Substitute variables in the whole query
+                    # Check for operations with unit-based variables (e.g., "x * 3" where x contains units)
+                    # Patterns like "x * 3", "x / 2", "x + 10", etc.
+                    unit_op_match = re.match(r'^\s*([a-zA-Z_][a-zA-Z0-9_]*)\s*([\+\-\*\/])\s*(-?[\d\.]+)\s*$', query)
+                    if unit_op_match:
+                        var_name = unit_op_match.group(1)
+                        operator = unit_op_match.group(2)
+                        number = float(unit_op_match.group(3))
+                        
+                        # Check if we have a saved numeric value for this variable
+                        hidden_value_key = f"_{var_name}_value"
+                        if hidden_value_key in variables:
+                            numeric_val = variables[hidden_value_key]
+                            
+                            # Perform the operation
+                            if operator == '+':
+                                result_val = numeric_val + number
+                            elif operator == '-':
+                                result_val = numeric_val - number
+                            elif operator == '*':
+                                result_val = numeric_val * number
+                            elif operator == '/':
+                                if number == 0:
+                                    print("Error: Division by zero")
+                                    continue
+                                result_val = numeric_val / number
+                            
+                            # If the original variable had units, preserve them
+                            if var_name in variables and isinstance(variables[var_name], str) and ' ' in variables[var_name]:
+                                _, unit = variables[var_name].split(' ', 1)
+                                print(f"Result: {result_val} {unit}")
+                            else:
+                                print(f"Result: {result_val}")
+                            continue
+                            
+                    # Regular expression with variable substitution
                     expression_to_evaluate = substitute_variables(query, variables)
 
                 # Evaluate with calculators
@@ -1195,11 +1189,14 @@ def start_cli_mode():
                         result, error = calculator.parse(expression_to_evaluate)
 
                         if error:
+                            # Calculator recognized format but failed internally
                             evaluation_error = error
                             break
                         elif result is not None:
+                            # Calculator successfully parsed and returned a result
                             calculated_result = result
                             break
+
                     except Exception as e:
                         evaluation_error = f"An unexpected error occurred: {e}"
                         break
@@ -1209,8 +1206,19 @@ def start_cli_mode():
                     print(f"Error: {evaluation_error}")
                 elif calculated_result is not None:
                     if is_assignment:
+                        # Store the result, preserving both numeric value and formatted display
                         variables[variable_name] = calculated_result
                         print(f"{variable_name} = {calculated_result}")
+                        
+                        # Also store a numeric version if it's a unit result
+                        if isinstance(calculated_result, str) and ' ' in calculated_result:
+                            try:
+                                # Try to extract numeric part for calculations
+                                value_str = calculated_result.split(' ', 1)[0]
+                                numeric_value = float(value_str)
+                                variables[f"_{variable_name}_value"] = numeric_value
+                            except (ValueError, IndexError):
+                                pass
                         
                         # Save to database if we have a session
                         if session_id:
@@ -1239,6 +1247,21 @@ def start_cli_mode():
             print(f"Warning: Failed to delete session: {e}")
     
     print("Thank you for using Calculator DSL!")
+
+# --- Entry Points ---
+def start_web_server():
+    """Entry point for running the web server."""
+    print("Initializing database...")
+    init_db()  # Ensure database exists and table is created on startup
+    
+    print("Starting web server on http://0.0.0.0:5200")
+    app.run(host="0.0.0.0", port=5200)
+
+def start_cli_mode():
+    """Entry point for running the CLI mode."""
+    # This directly runs the CLI mode
+    init_db()
+    run_cli_mode()
 
 def main():
     """Main entry point that decides between web and CLI mode based on arguments."""

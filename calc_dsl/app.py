@@ -393,10 +393,11 @@ class DerivedUnitCalculator(CalculatorInterface):
     Support for expressions like "$2/ml" or "10 EUR/km" and conversions between them.
     """
     
-    # Pattern for assigning derived unit rate: "x = $2/ml" or "x = 5 USD/km"
+    # Pattern for assigning derived unit rate: "x = $2/ml" or "x = 5 USD/km" 
+    # Also handles currency symbol before number: "$2/ml"
     # Captures: value, currency symbol or code, unit
     derived_unit_pattern = re.compile(
-        r"^\s*([\d\.\-]+)\s*([$€£¥]|[A-Z]{3})\s*\/\s*([\w\s]+?)\s*$", re.IGNORECASE
+        r"^\s*(?:([$€£¥])([\d\.\-]+)|([\d\.\-]+)\s*([$€£¥]|[A-Z]{3}))\s*\/\s*([\w\s]+?)\s*$", re.IGNORECASE
     )
     
     # Pattern for converting with derived rate: "given x; find 10oz in dollar"
@@ -441,7 +442,15 @@ class DerivedUnitCalculator(CalculatorInterface):
         # Assignment will be handled separately
         match = self.derived_unit_pattern.match(query)
         if match:
-            value_str, currency, unit = match.groups()
+            # Extract groups, handling both formats: "$2/ml" and "2 USD/ml"
+            symbol_prefix, value_str_with_prefix, value_str, currency, unit = match.groups()
+            
+            # Determine which format was matched and extract values
+            if symbol_prefix and value_str_with_prefix:  
+                # Format: "$2/ml"
+                currency = symbol_prefix
+                value_str = value_str_with_prefix
+            # else: Format "2 USD/ml" (value_str and currency are already set)
             
             # Normalize currency to code if it's a symbol
             if currency in self.currency_symbols:

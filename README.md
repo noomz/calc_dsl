@@ -33,9 +33,11 @@ A domain-specific language for performing various calculation tasks, including:
 ### Derived Unit Calculator
 - Create and use rates that combine currencies and physical units
 - Useful for pricing, rates, and unit economics calculations
+- Bidirectional conversion between units and currencies
 - Examples:
   - `x = $2/ml` (define a rate of $2 per milliliter)
-  - `given x; find 10oz in dollar` (convert 10 ounces to dollars using rate x)
+  - `given x; find 10fluid_ounce in dollar` (convert 10 fluid ounces to dollars using rate x)
+  - `given x; find 20dollar in fluid_ounce` (convert $20 to fluid ounces using rate x)
 
 ### Math Calculator
 - Support for traditional syntax: `5 + 3`, `7 * 8`
@@ -184,8 +186,10 @@ $10 to €                   → 8.50 EUR
 ```
 x = $2/ml                  → 2 USD/ml
 given x; find 10fluid_ounce in dollar → 590.59 USD  (10 fluid ounces at $2/ml)
+given x; find 20dollar in fluid_ounce → 10.0 fluid_ounce  (inverse: $20 worth at $2/ml)
 y = 5 EUR/km               → 5 EUR/km
 given y; find 10miles in euro → 80.47 EUR  (10 miles at 5 EUR/km)
+given y; find 50euro in mile → 10.0 mile  (inverse: €50 worth at 5 EUR/km)
 ```
 
 ### Math Expressions

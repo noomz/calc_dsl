@@ -400,8 +400,10 @@ class DerivedUnitCalculator(CalculatorInterface):
         r"^\s*(?:([$€£¥])([\d\.\-]+)|([\d\.\-]+)\s*([$€£¥]|[A-Z]{3}))\s*\/\s*([\w\s]+?)\s*$", re.IGNORECASE
     )
     
-    # Pattern for converting with derived rate: "given x; find 10oz in dollar"
-    # Captures: variable_name, value, unit, currency
+    # Pattern for converting with derived rate in both directions:
+    # - "given x; find 10oz in dollar" (unit to currency)
+    # - "given x; find 10dollar in oz" (currency to unit)
+    # Captures: variable_name, value, from_unit, to_unit
     conversion_pattern = re.compile(
         r"^\s*given\s+([a-zA-Z_][a-zA-Z0-9_]*)\s*;\s*find\s+([\d\.\-]+)\s*([\w\s]+?)\s+in\s+([\w\s]+?)\s*$", 
         re.IGNORECASE
@@ -483,13 +485,23 @@ class DerivedUnitCalculator(CalculatorInterface):
         # Check for the conversion pattern using a derived unit rate
         match = self.conversion_pattern.match(query)
         if match:
-            var_name, value_str, from_unit, to_currency = match.groups()
+            var_name, value_str, from_unit, to_unit = match.groups()
             
-            # Normalize currency name to code
-            if to_currency.lower() in self.currency_names:
-                to_currency_code = self.currency_names[to_currency.lower()]
-            else:
-                to_currency_code = to_currency.upper()
+            # Normalize units/currencies as needed
+            from_unit = from_unit.strip()
+            to_unit = to_unit.strip()
+            
+            # Check if from_unit might be a currency
+            if from_unit.lower() in self.currency_names:
+                from_unit = self.currency_names[from_unit.lower()]
+            elif from_unit.upper() in self.currency_symbols.values():
+                from_unit = from_unit.upper()
+                
+            # Check if to_unit might be a currency
+            if to_unit.lower() in self.currency_names:
+                to_unit = self.currency_names[to_unit.lower()]
+            elif to_unit.upper() in self.currency_symbols.values():
+                to_unit = to_unit.upper()
                 
             try:
                 value = float(value_str)
@@ -500,8 +512,8 @@ class DerivedUnitCalculator(CalculatorInterface):
                     "type": "derived_conversion", 
                     "var_name": var_name, 
                     "value": value, 
-                    "unit": from_unit.strip(), 
-                    "currency": to_currency_code
+                    "from_unit": from_unit,
+                    "to_unit": to_unit
                 }, None
             except ValueError:
                 return None, f"Invalid number '{value_str}' in derived unit conversion."
@@ -510,27 +522,39 @@ class DerivedUnitCalculator(CalculatorInterface):
         # Example: "given 2 USD/ml; find 10oz in dollar"
         match = self.substituted_conversion_pattern.match(query)
         if match:
-            rate_value_str, rate_currency, rate_unit, value_str, from_unit, to_currency = match.groups()
+            rate_value_str, rate_currency, rate_unit, value_str, from_unit, to_unit = match.groups()
             
-            # Normalize currency name to code
-            if to_currency.lower() in self.currency_names:
-                to_currency_code = self.currency_names[to_currency.lower()]
-            else:
-                to_currency_code = to_currency.upper()
+            # Normalize units/currencies
+            from_unit = from_unit.strip()
+            to_unit = to_unit.strip()
+            rate_unit = rate_unit.strip()
+            
+            # Normalize from_unit (might be currency or unit)
+            if from_unit.lower() in self.currency_names:
+                from_unit = self.currency_names[from_unit.lower()]
+            elif from_unit.upper() in self.currency_symbols.values():
+                from_unit = from_unit.upper()
+                
+            # Normalize to_unit (might be currency or unit)
+            if to_unit.lower() in self.currency_names:
+                to_unit = self.currency_names[to_unit.lower()]
+            elif to_unit.upper() in self.currency_symbols.values():
+                to_unit = to_unit.upper()
                 
             try:
                 rate_value = float(rate_value_str)
                 value = float(value_str)
                 
                 # Create a rate string that can be processed directly
-                rate_str = f"{rate_value} {rate_currency}/{rate_unit.strip()}"
+                rate_str = f"{rate_value} {rate_currency}/{rate_unit}"
                 
                 # Process the conversion directly since we have all the information
+                # The process_derived_conversion method will determine direction
                 return self.process_derived_conversion(
                     rate_info=rate_str,
                     value=value,
-                    from_unit=from_unit.strip(),
-                    to_currency=to_currency_code
+                    from_unit=from_unit,
+                    to_currency=to_unit  # Now could be either unit or currency
                 )
             except ValueError as e:
                 return None, f"Invalid number in derived unit conversion: {e}"
@@ -566,47 +590,126 @@ class DerivedUnitCalculator(CalculatorInterface):
             rate_value = float(rate_value)
             rate_unit = rate_unit.strip()
             
-            # Special handling for fluid ounces
-            normalized_from_unit = from_unit.strip().lower()
-            if normalized_from_unit in ["oz", "ounce", "ounces"] and rate_unit.lower() in ["ml", "milliliter", "milliliters"]:
-                # Assume fluid ounces for volume conversion
-                normalized_from_unit = "fluid_ounce"
+            # Check the direction of the conversion
+            conversion_type = self._determine_conversion_type(from_unit, to_currency, rate_unit, rate_currency)
             
-            # Convert the input value from its units to the rate's units
-            # This creates a quantity with the input units
-            try:
-                quantity = self.Q_(value, normalized_from_unit)
-                # Convert to the rate's units
-                quantity_in_rate_units = quantity.to(rate_unit)
-                # Get the magnitude in the rate's units
-                amount_in_rate_units = quantity_in_rate_units.magnitude
-            except Exception as e:
-                # If conversion failed, provide a more helpful error message
-                if normalized_from_unit in ["oz", "ounce", "ounces"]:
-                    return None, f"Unit conversion error: For volume conversions, please use 'fluid_ounce' or 'fl_oz' instead of 'oz'."
-                return None, f"Unit conversion error: {e}"
-            
-            # Calculate the currency amount based on the rate
-            currency_amount = amount_in_rate_units * rate_value
-            
-            # If the currency in the rate is different from the target currency, convert it
-            if rate_currency != to_currency:
-                # Attempt currency conversion
-                conversion_result = self.currency_calculator._convert_currency(
-                    currency_amount, rate_currency, to_currency
+            if conversion_type == "unit_to_currency":
+                # Normal direction: converting from unit to currency (e.g., given 5EUR/km, find 10km in EUR)
+                return self._convert_unit_to_currency(
+                    value, from_unit, to_currency, 
+                    rate_value, rate_currency, rate_unit
                 )
-                if conversion_result is None:
-                    # Provide a more helpful error message with supported currencies
-                    supported_currencies = ", ".join(sorted([code for code in self.currency_calculator.currency_names.values()]))
-                    return None, f"Could not convert from {rate_currency} to {to_currency}. Supported currencies: {supported_currencies}"
-                currency_amount = conversion_result
+            elif conversion_type == "currency_to_unit":
+                # Reverse direction: converting from currency to unit (e.g., given 5EUR/km, find 10EUR in km)
+                return self._convert_currency_to_unit(
+                    value, from_unit, to_currency,
+                    rate_value, rate_currency, rate_unit
+                )
+            else:
+                return None, f"Incompatible units for conversion: cannot convert between {from_unit} and {to_currency} using rate {rate_info}"
+                
+        except Exception as e:
+            return None, f"Error during derived unit conversion: {e}"
+    
+    def _determine_conversion_type(self, from_unit, to_currency, rate_unit, rate_currency):
+        """Determine the type of conversion needed."""
+        # Check if converting from unit to currency
+        try:
+            # Try to create a quantity with from_unit
+            test_quantity = self.Q_(1, from_unit)
+            # Try to convert it to rate_unit
+            _ = test_quantity.to(rate_unit)
+            return "unit_to_currency"
+        except Exception:
+            pass
             
-            # Format output: "X.XX CURRENCY"
-            result = f"{currency_amount:.2f} {to_currency}"
+        # Check if converting from currency to unit
+        is_currency = from_unit.upper() in self.currency_symbols.values() or from_unit in self.currency_names.values()
+        if is_currency:
+            return "currency_to_unit"
+            
+        # If we can't determine the conversion type, it's likely incompatible
+        return "incompatible"
+    
+    def _convert_unit_to_currency(self, value, from_unit, to_currency, 
+                                 rate_value, rate_currency, rate_unit):
+        """Convert from a unit to a currency (e.g., km to EUR)"""
+        # Special handling for fluid ounces
+        normalized_from_unit = from_unit.strip().lower()
+        if normalized_from_unit in ["oz", "ounce", "ounces"] and rate_unit.lower() in ["ml", "milliliter", "milliliters"]:
+            # Assume fluid ounces for volume conversion
+            normalized_from_unit = "fluid_ounce"
+        
+        try:
+            # Convert the input value from its units to the rate's units
+            quantity = self.Q_(value, normalized_from_unit)
+            # Convert to the rate's units
+            quantity_in_rate_units = quantity.to(rate_unit)
+            # Get the magnitude in the rate's units
+            amount_in_rate_units = quantity_in_rate_units.magnitude
+        except Exception as e:
+            # If conversion failed, provide a more helpful error message
+            if normalized_from_unit in ["oz", "ounce", "ounces"]:
+                return None, f"Unit conversion error: For volume conversions, please use 'fluid_ounce' or 'fl_oz' instead of 'oz'."
+            return None, f"Unit conversion error: {e}"
+        
+        # Calculate the currency amount based on the rate
+        currency_amount = amount_in_rate_units * rate_value
+        
+        # If the currency in the rate is different from the target currency, convert it
+        if rate_currency != to_currency:
+            # Attempt currency conversion
+            conversion_result = self.currency_calculator._convert_currency(
+                currency_amount, rate_currency, to_currency
+            )
+            if conversion_result is None:
+                # Provide a more helpful error message with supported currencies
+                supported_currencies = ", ".join(sorted([code for code in self.currency_calculator.currency_names.values()]))
+                return None, f"Could not convert from {rate_currency} to {to_currency}. Supported currencies: {supported_currencies}"
+            currency_amount = conversion_result
+        
+        # Format output: "X.XX CURRENCY"
+        result = f"{currency_amount:.2f} {to_currency}"
+        
+        return result, None
+    
+    def _convert_currency_to_unit(self, value, from_currency, to_unit, 
+                                 rate_value, rate_currency, rate_unit):
+        """Convert from a currency to a unit (e.g., EUR to km)"""
+        try:
+            # First, convert the currency if needed
+            if from_currency != rate_currency:
+                # Convert from the input currency to the rate's currency
+                converted_value = self.currency_calculator._convert_currency(
+                    value, from_currency, rate_currency
+                )
+                if converted_value is None:
+                    supported_currencies = ", ".join(sorted([code for code in self.currency_calculator.currency_names.values()]))
+                    return None, f"Could not convert from {from_currency} to {rate_currency}. Supported currencies: {supported_currencies}"
+                currency_amount = converted_value
+            else:
+                currency_amount = value
+            
+            # Apply the inverse of the rate to get the unit amount
+            # For example, if rate is 5EUR/km, then 10EUR = 10/(5EUR/km) = 2km
+            unit_amount = currency_amount / rate_value
+            
+            # Create a quantity in the rate's unit
+            unit_quantity = self.Q_(unit_amount, rate_unit)
+            
+            # Convert to the target unit if different
+            if to_unit != rate_unit:
+                try:
+                    unit_quantity = unit_quantity.to(to_unit)
+                except Exception as e:
+                    return None, f"Unit conversion error: Cannot convert from {rate_unit} to {to_unit}: {e}"
+            
+            # Format the result
+            result = f"{unit_quantity.magnitude:.4f} {unit_quantity.units:~P}"
             
             return result, None
         except Exception as e:
-            return None, f"Error during derived unit conversion: {e}"
+            return None, f"Error converting currency to unit: {e}"
 
 
 class CurrencyCalculator(CalculatorInterface):
@@ -1382,8 +1485,8 @@ def calculate_in_session(session_id):
                         conv_result, conv_error = derived_calculator.process_derived_conversion(
                             rate_info=rate_info,
                             value=derived_info["value"],
-                            from_unit=derived_info["unit"],
-                            to_currency=derived_info["currency"]
+                            from_unit=derived_info["from_unit"],
+                            to_currency=derived_info["to_unit"]
                         )
                         
                         if conv_error:
@@ -1796,7 +1899,8 @@ def run_cli_mode():
                     print("  10 USD to EUR   - Convert currencies (using codes)")
                     print("  $10 to €        - Convert currencies (using symbols)")
                     print("  x = $2/ml       - Set a derived unit rate")
-                    print("  given x; find 10fluid_ounce in dollar - Convert using derived unit rate")
+                    print("  given x; find 10fluid_ounce in dollar - Convert unit to currency using rate")
+                    print("  given x; find 10dollar in fluid_ounce - Convert currency to unit using rate")
                     print("  3 power of 2    - Use natural language math")
                     print("  square root of 16 - Use more complex expressions")
                     print("  2% of 100       - Calculate percentages")
@@ -1956,8 +2060,8 @@ def run_cli_mode():
                                     conv_result, conv_error = derived_calculator.process_derived_conversion(
                                         rate_info=rate_info,
                                         value=derived_info["value"],
-                                        from_unit=derived_info["unit"],
-                                        to_currency=derived_info["currency"]
+                                        from_unit=derived_info["from_unit"],
+                                        to_currency=derived_info["to_unit"]
                                     )
                                     
                                     if conv_error:

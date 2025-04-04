@@ -1471,12 +1471,51 @@ def run_cli_mode():
     """Run calculator in interactive CLI mode."""
     import os
     import argparse
+    import json
+    from pathlib import Path
+    
+    # Workspace file to remember last session
+    config_dir = Path(os.path.expanduser("~")) / ".config" / "calc_dsl"
+    workspace_file = config_dir / "workspace.json"
+    
+    # Create config directory if it doesn't exist
+    config_dir.mkdir(parents=True, exist_ok=True)
+    
+    # Function to load workspace data
+    def load_workspace():
+        if workspace_file.exists():
+            try:
+                with open(workspace_file, 'r') as f:
+                    return json.load(f)
+            except json.JSONDecodeError:
+                return {}
+        return {}
+    
+    # Function to save workspace data
+    def save_workspace(data):
+        with open(workspace_file, 'w') as f:
+            json.dump(data, f, indent=2)
     
     # Parse command-line arguments
     parser = argparse.ArgumentParser(description='Calculator DSL CLI')
     parser.add_argument('--session', '-s', type=str, help='Use an existing session ID')
     parser.add_argument('--keep-session', '-k', action='store_true', help='Keep the session after exiting')
+    parser.add_argument('--new-session', '-n', action='store_true', help='Create a new session instead of using last session')
     args = parser.parse_args()
+    
+    # Load workspace data
+    workspace = load_workspace()
+    
+    # Get the session ID from args or workspace
+    if args.session:
+        # User specified a session ID, use that
+        session_id_to_load = args.session
+    elif args.new_session:
+        # User wants a new session
+        session_id_to_load = None
+    else:
+        # Try to use the last session from workspace
+        session_id_to_load = workspace.get('last_session_id')
     
     # Variables that will be used by the completer
     variables = {}
@@ -1499,7 +1538,7 @@ def run_cli_mode():
         
         # Enable tab completion for commands
         def completer(text, state):
-            commands = ['help', 'vars', 'exit', 'quit', 'print', 'keep-session']
+            commands = ['help', 'vars', 'sessions', 'exit', 'quit', 'print', 'keep-session']
             units = ['km', 'miles', 'meters', 'm', 'feet', 'foot', 'ft', 'inch', 'inches', 
                      'kg', 'kilogram', 'gram', 'g', 'pound', 'lb', 'ounce', 'oz', 'fluid_ounce', 'fl_oz',
                      'liter', 'l', 'ml', 'milliliter', 'gallon', 'gal', 'celsius', 'fahrenheit', 'kelvin']
@@ -1613,24 +1652,49 @@ def run_cli_mode():
     keep_session = args.keep_session
     session_id = None
     
-    if args.session:
+    if session_id_to_load:
         # Try to load existing session
-        variables = load_session(args.session)
+        variables = load_session(session_id_to_load)
         if variables is not None:
-            session_id = args.session
+            session_id = session_id_to_load
             print(f"Loaded existing session: {session_id}")
+            
+            # Update workspace info
+            if 'session_info' not in workspace:
+                workspace['session_info'] = {}
+            
+            # Update creation info if we don't have it yet
+            if session_id not in workspace['session_info']:
+                workspace['session_info'][session_id] = {
+                    'created_at': datetime.datetime.now().isoformat(),
+                    'last_used': datetime.datetime.now().isoformat()
+                }
+            else:
+                # Update last used time
+                workspace['session_info'][session_id]['last_used'] = datetime.datetime.now().isoformat()
+                
+            # Save workspace changes
+            save_workspace(workspace)
         else:
-            print(f"Session {args.session} not found. Creating a new session.")
+            print(f"Session {session_id_to_load} not found. Creating a new session.")
             session_id = create_session_db()
             variables = {}
     else:
         # Create a new session
         session_id = create_session_db()
         variables = {}
-    
-    if session_id and not args.session:
         print(f"Session created: {session_id}")
+    
+    # Update last session in workspace
+    workspace['last_session_id'] = session_id
+    save_workspace(workspace)
+    
+    # Inform the user about session behavior
+    if session_id and not args.keep_session:
         print("Session will be deleted on exit. Use 'keep-session' command to keep it.")
+    elif session_id and args.keep_session:
+        keep_session = True
+        print(f"Session will be kept after exiting.")
     elif not session_id:
         print("Warning: Failed to create session. Variables won't be saved.")
     
@@ -1649,13 +1713,28 @@ def run_cli_mode():
                         print(f"Deleting temporary session: {session_id}")
                     elif session_id and keep_session:
                         print(f"Keeping session: {session_id}")
-                        print(f"You can resume this session later with: calc --session {session_id}")
+                        print(f"The next time you run calc, this session will be loaded automatically.")
                     break
                 
                 if query.lower() == 'keep-session':
                     keep_session = True
                     print(f"Session {session_id} will be kept after exiting.")
-                    print(f"You can resume this session later with: calc --session {session_id}")
+                    print(f"The next time you run calc, this session will be loaded automatically.")
+                    
+                    # Update workspace to mark this session as kept
+                    if 'session_info' not in workspace:
+                        workspace['session_info'] = {}
+                        
+                    workspace['session_info'][session_id] = {
+                        'created_at': workspace.get('session_info', {}).get(session_id, {}).get('created_at', 
+                                    datetime.datetime.now().isoformat()),
+                        'last_used': datetime.datetime.now().isoformat(),
+                        'description': 'Kept session'
+                    }
+                    
+                    # Save workspace to remember this session for next time
+                    workspace['last_session_id'] = session_id
+                    save_workspace(workspace)
                     continue
                 
                 if query.lower() == 'vars':
@@ -1668,6 +1747,30 @@ def run_cli_mode():
                             # Skip internal/hidden variables (those starting with underscore)
                             if not name.startswith('_'):
                                 print(f"  {name} = {value}")
+                    continue
+                
+                if query.lower() == 'sessions':
+                    # List saved sessions from workspace
+                    if 'session_info' not in workspace or not workspace['session_info']:
+                        print("No saved sessions.")
+                    else:
+                        print("Available sessions:")
+                        for sess_id, info in workspace['session_info'].items():
+                            last_used = info.get('last_used', 'unknown')
+                            # Truncate the session ID for display
+                            short_id = sess_id[:8] + "..." if len(sess_id) > 10 else sess_id
+                            
+                            # Mark the current session
+                            current = " (current)" if sess_id == session_id else ""
+                            
+                            # Format last used date/time
+                            try:
+                                last_used_dt = datetime.datetime.fromisoformat(last_used)
+                                last_used_str = last_used_dt.strftime("%Y-%m-%d %H:%M")
+                            except ValueError:
+                                last_used_str = last_used
+                                
+                            print(f"  {short_id}{current} - Last used: {last_used_str}")
                     continue
                 
                 # Check for print variable command (e.g., "?x" or "print x")
@@ -1699,13 +1802,16 @@ def run_cli_mode():
                     print("  2% of 100       - Calculate percentages")
                     print("\nCommands:")
                     print("  vars            - Show all variables")
+                    print("  sessions        - List all saved sessions")
                     print("  keep-session    - Keep the session after exiting (for later use)")
                     print("  help            - Show this help message")
                     print("  exit/quit       - Exit the calculator")
                     print("\nSession Management:")
                     print("  - By default, sessions are temporary and deleted on exit")
                     print("  - Use 'keep-session' to preserve your session")
-                    print("  - To load a saved session: calc --session SESSION_ID")
+                    print("  - The last kept session will be loaded automatically next time")
+                    print("  - Use '--new-session' flag to start with a fresh session")
+                    print("  - To load a specific session: calc --session SESSION_ID")
                     continue
                 
                 # Process calculation
@@ -1908,14 +2014,42 @@ def run_cli_mode():
             print(f"Deleting temporary session: {session_id}")
         elif session_id and keep_session:
             print(f"Keeping session: {session_id}")
-            print(f"You can resume this session later with: calc --session {session_id}")
+            print(f"The next time you run calc, this session will be loaded automatically.")
     
     # Clean up the session if needed
     if session_id and not keep_session:
         try:
+            # Delete the session
             delete_session_db(session_id)
+            
+            # Update workspace to remove this session
+            if 'session_info' in workspace and session_id in workspace.get('session_info', {}):
+                del workspace['session_info'][session_id]
+                
+            # Clear last_session_id if it matches the deleted session
+            if workspace.get('last_session_id') == session_id:
+                workspace['last_session_id'] = None
+                
+            # Save workspace changes
+            save_workspace(workspace)
+            
         except Exception as e:
             print(f"Warning: Failed to delete session: {e}")
+    elif session_id and keep_session:
+        # Update workspace with kept session info
+        if 'session_info' not in workspace:
+            workspace['session_info'] = {}
+            
+        workspace['session_info'][session_id] = {
+            'created_at': workspace.get('session_info', {}).get(session_id, {}).get('created_at', 
+                          datetime.datetime.now().isoformat()),
+            'last_used': datetime.datetime.now().isoformat(),
+            'description': 'Kept session'
+        }
+        
+        # Save workspace to remember this session for next time
+        workspace['last_session_id'] = session_id
+        save_workspace(workspace)
     
     print("Thank you for using Calculator DSL!")
 

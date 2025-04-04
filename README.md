@@ -84,29 +84,42 @@ Tab completion makes it easy to:
 
 #### Session Management
 
-The CLI can create persistent sessions to keep your variables between runs:
+The CLI has automatic session management that remembers your last session:
 
 ```bash
+# Your session is automatically saved in ~/.config/calc_dsl/workspace.json
 # By default, sessions are temporary and deleted on exit
 # To keep a session for later use:
 calc> keep-session
 Session 123e4567-e89b-12d3-a456-426614174000 will be kept after exiting.
-You can resume this session later with: calc --session 123e4567-e89b-12d3-a456-426614174000
+The next time you run calc, this session will be loaded automatically.
 
 # Exit the calculator (session is preserved)
 calc> exit
 
-# Resume the session later
-poetry run calc --session 123e4567-e89b-12d3-a456-426614174000
+# Next time you run calc, your session is automatically loaded
+poetry run calc
 Loaded existing session: 123e4567-e89b-12d3-a456-426614174000
+
+# View all your saved sessions
+calc> sessions
+Available sessions:
+  123e4567... (current) - Last used: 2023-08-15 14:30
+
+# Start with a fresh session instead of the last one
+poetry run calc --new-session
+
+# Load a specific session explicitly
+poetry run calc --session 123e4567-e89b-12d3-a456-426614174000
 
 # Start the CLI with a session that will be kept after exiting
 poetry run calc --keep-session
 ```
 
 This allows you to:
+- Automatically continue where you left off
 - Save your work between CLI sessions
-- Continue where you left off
+- Manage multiple sessions
 - Share sessions between CLI and API modes
 
 ### Web Server

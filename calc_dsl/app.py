@@ -1500,17 +1500,89 @@ def run_cli_mode():
         # Enable tab completion for commands
         def completer(text, state):
             commands = ['help', 'vars', 'exit', 'quit', 'print', 'keep-session']
-            # If there's a space, it might be a 'print' command followed by a variable name
+            units = ['km', 'miles', 'meters', 'm', 'feet', 'foot', 'ft', 'inch', 'inches', 
+                     'kg', 'kilogram', 'gram', 'g', 'pound', 'lb', 'ounce', 'oz', 'fluid_ounce', 'fl_oz',
+                     'liter', 'l', 'ml', 'milliliter', 'gallon', 'gal', 'celsius', 'fahrenheit', 'kelvin']
+            currencies = ['USD', 'EUR', 'GBP', 'JPY', 'CAD', 'AUD', 'CHF', 'CNY', 'INR', 'THB', 
+                         'dollar', 'euro', 'pound', 'yen', 'baht', 'rupee', 'yuan']
+            
+            # If there's a space, check for different patterns
             if ' ' in text:
-                cmd, partial_var = text.split(' ', 1)
-                if cmd.lower() == 'print':
-                    # Complete variable names
-                    matching_vars = [f"print {v}" for v in variables.keys() if v.startswith(partial_var) and not v.startswith('_')]
+                # Split at the first space
+                parts = text.split(' ', 1)
+                cmd = parts[0].lower()
+                rest = parts[1]
+                
+                # Handle 'print <var>' completion
+                if cmd == 'print':
+                    matching_vars = [f"print {v}" for v in variables.keys() 
+                                   if v.startswith(rest) and not v.startswith('_')]
                     if state < len(matching_vars):
                         return matching_vars[state]
                     return None
+                
+                # Handle 'given <var>; find' pattern
+                if cmd == 'given' and ';' not in rest:
+                    # Complete variable names for 'given' expression
+                    var_part = rest.strip()
+                    matching_vars = [f"given {v}; find " for v in variables.keys() 
+                                  if v.startswith(var_part) and not v.startswith('_')]
+                    if state < len(matching_vars):
+                        return matching_vars[state]
+                    return None
+                
+                # Handle 'x = ' assignment pattern
+                if '=' in text and text.strip().endswith('='):
+                    # Offer some example completions for assignments
+                    options = [f"{text} 10", f"{text} $2/ml", f"{text} 5 + 3", f"{text} 10km to miles"]
+                    if state < len(options):
+                        return options[state]
+                    return None
+                
+                # Handle 'to' completions for unit/currency conversions
+                if ' to ' in text:
+                    # Complete units or currencies after "to"
+                    parts = text.split(' to ', 1)
+                    partial = parts[1].strip()
+                    
+                    # Check if it's likely a currency conversion
+                    is_currency = any(curr in parts[0].upper() for curr in currencies) or '$' in parts[0] or '€' in parts[0]
+                    if is_currency:
+                        matches = [f"{parts[0]} to {curr}" for curr in currencies if curr.startswith(partial)]
+                    else:
+                        # Assume unit conversion
+                        matches = [f"{parts[0]} to {unit}" for unit in units if unit.startswith(partial)]
+                    
+                    if state < len(matches):
+                        return matches[state]
+                    return None
+                    
+                # Handle 'in <currency>' completions for derived unit conversions
+                if ' in ' in text:
+                    parts = text.split(' in ', 1)
+                    partial = parts[1].strip()
+                    matches = [f"{parts[0]} in {curr}" for curr in currencies if curr.startswith(partial)]
+                    if state < len(matches):
+                        return matches[state]
+                    return None
+                    
+            elif text.startswith('?'):
+                # Handle ?var syntax for printing variables
+                partial_var = text[1:]
+                matching_vars = [f"?{v}" for v in variables.keys() 
+                               if v.startswith(partial_var) and not v.startswith('_')]
+                if state < len(matching_vars):
+                    return matching_vars[state]
+                return None
+            
             # Standard command completion
             matches = [cmd for cmd in commands if cmd.startswith(text)]
+            
+            # Also suggest variables for direct use
+            if text and not text.startswith('?') and not ' ' in text:
+                matches.extend([v for v in variables.keys() 
+                             if v.startswith(text) and not v.startswith('_')])
+                
             if state < len(matches):
                 return matches[state]
             return None
@@ -1529,8 +1601,10 @@ def run_cli_mode():
             
     print("Calculator DSL - Press Ctrl+C to exit")
     print("Enter calculations or expressions like: '2 + 2', '9am - 5pm', or '5 km to miles'")
-    if not has_readline:
-        print("Note: Install 'readline' (Unix) or 'pyreadline3' (Windows) for command history and arrow key support")
+    if has_readline:
+        print("Use TAB for command and expression completion (e.g., 'x = 10', '5km to <TAB>', 'given x; <TAB>')")
+    else:
+        print("Note: Install 'readline' (Unix) or 'pyreadline3' (Windows) for command history and tab completion")
     
     # Initialize database
     init_db()

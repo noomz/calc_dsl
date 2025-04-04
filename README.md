@@ -53,7 +53,7 @@ A domain-specific language for performing various calculation tasks, including:
 
 ### Command Line Interface (CLI)
 
-The calculator provides an interactive command line interface:
+The calculator provides an interactive command line interface with tab completion:
 
 ```bash
 # Start the interactive calculator CLI
@@ -74,6 +74,13 @@ Current variables:
 calc> help
 # Shows available commands and examples
 ```
+
+Tab completion makes it easy to:
+- Complete commands: `h<TAB>` → `help`
+- Access variables: `?x<TAB>` → `?x` (prints the value of x)
+- Complete unit conversions: `5km to <TAB>` → shows available units
+- Complete derived unit queries: `given x; <TAB>` → expands to `given x; find `
+- Get example assignments: `y = <TAB>` → shows assignment examples
 
 #### Session Management
 

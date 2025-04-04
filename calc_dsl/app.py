@@ -403,16 +403,18 @@ class DerivedUnitCalculator(CalculatorInterface):
     # Pattern for converting with derived rate in both directions:
     # - "given x; find 10oz in dollar" (unit to currency)
     # - "given x; find 10dollar in oz" (currency to unit)
-    # Captures: variable_name, value, from_unit, to_unit
+    # - "given x; find $10 in oz" (currency with symbol to unit)
+    # Captures: variable_name, value, from_unit_or_symbol, to_unit
     conversion_pattern = re.compile(
-        r"^\s*given\s+([a-zA-Z_][a-zA-Z0-9_]*)\s*;\s*find\s+([\d\.\-]+)\s*([\w\s]+?)\s+in\s+([\w\s]+?)\s*$", 
+        r"^\s*given\s+([a-zA-Z_][a-zA-Z0-9_]*)\s*;\s*find\s+(([$€£¥])?([\d\.\-]+)([$€£¥])?)\s*([\w\s]*?)\s+in\s+([\w\s]+?)\s*$", 
         re.IGNORECASE
     )
     
     # Alternative pattern for when variable substitution has occurred: "given 2 USD/ml; find 10oz in dollar"
-    # Captures: rate_value, rate_currency, rate_unit, value, unit, currency
+    # Also handles currency symbols: "given 2 USD/ml; find $10 in oz"
+    # Captures: rate_value, rate_currency, rate_unit, value with possible symbols, unit, currency
     substituted_conversion_pattern = re.compile(
-        r"^\s*given\s+([\d\.\-]+)\s+([A-Z]{3})\/([^;]+);\s*find\s+([\d\.\-]+)\s*([\w\s]+?)\s+in\s+([\w\s]+?)\s*$",
+        r"^\s*given\s+([\d\.\-]+)\s+([A-Z]{3})\/([^;]+);\s*find\s+(([$€£¥])?([\d\.\-]+)([$€£¥])?)\s*([\w\s]*?)\s+in\s+([\w\s]+?)\s*$",
         re.IGNORECASE
     )
     
@@ -485,23 +487,41 @@ class DerivedUnitCalculator(CalculatorInterface):
         # Check for the conversion pattern using a derived unit rate
         match = self.conversion_pattern.match(query)
         if match:
-            var_name, value_str, from_unit, to_unit = match.groups()
+            var_name, full_value, prefix_symbol, value_str, suffix_symbol, from_unit, to_unit = match.groups()
+            
+            # Handle currency symbols in the value
+            is_currency_value = False
+            currency_code = None
+            
+            # Check for currency symbols before/after number
+            if prefix_symbol:
+                # Format: $10
+                currency_code = self.currency_symbols.get(prefix_symbol, "USD")
+                is_currency_value = True
+            elif suffix_symbol:
+                # Format: 10$
+                currency_code = self.currency_symbols.get(suffix_symbol, "USD")
+                is_currency_value = True
             
             # Normalize units/currencies as needed
-            from_unit = from_unit.strip()
+            from_unit = from_unit.strip() if from_unit else ""
             to_unit = to_unit.strip()
             
-            # Check if from_unit might be a currency
-            from_unit_lower = from_unit.lower()
-            if from_unit_lower in self.currency_names:
-                from_unit = self.currency_names[from_unit_lower]
-            elif from_unit.upper() in self.currency_symbols.values():
-                from_unit = from_unit.upper()
-            # Check for common currency misspellings
-            elif from_unit_lower in ["dollar", "dollars", "dallar", "dollor", "dollors", "dolar"]:
-                from_unit = "USD"
-            elif from_unit_lower in ["euro", "euros", "eur", "euos"]:
-                from_unit = "EUR"
+            # If we have a currency symbol, the from_unit is the currency
+            # Otherwise, check if from_unit might be a currency
+            if is_currency_value:
+                from_unit = currency_code
+            else:
+                from_unit_lower = from_unit.lower()
+                if from_unit_lower in self.currency_names:
+                    from_unit = self.currency_names[from_unit_lower]
+                elif from_unit.upper() in self.currency_symbols.values():
+                    from_unit = from_unit.upper()
+                # Check for common currency misspellings
+                elif from_unit_lower in ["dollar", "dollars", "dallar", "dollor", "dollors", "dolar"]:
+                    from_unit = "USD"
+                elif from_unit_lower in ["euro", "euros", "eur", "euos"]:
+                    from_unit = "EUR"
                 
             # Check if to_unit might be a currency
             to_unit_lower = to_unit.lower()
@@ -528,30 +548,49 @@ class DerivedUnitCalculator(CalculatorInterface):
                     "to_unit": to_unit
                 }, None
             except ValueError:
-                return None, f"Invalid number '{value_str}' in derived unit conversion."
+                return None, f"Invalid number '{full_value}' in derived unit conversion."
         
         # Check for the substituted conversion pattern (after variable substitution)
         # Example: "given 2 USD/ml; find 10oz in dollar"
         match = self.substituted_conversion_pattern.match(query)
         if match:
-            rate_value_str, rate_currency, rate_unit, value_str, from_unit, to_unit = match.groups()
+            rate_value_str, rate_currency, rate_unit, full_value, prefix_symbol, value_str, suffix_symbol, from_unit, to_unit = match.groups()
+            
+            # Handle currency symbols in the value
+            is_currency_value = False
+            currency_code = None
+            
+            # Check for currency symbols before/after number
+            if prefix_symbol:
+                # Format: $10
+                currency_code = self.currency_symbols.get(prefix_symbol, "USD")
+                is_currency_value = True
+            elif suffix_symbol:
+                # Format: 10$
+                currency_code = self.currency_symbols.get(suffix_symbol, "USD")
+                is_currency_value = True
             
             # Normalize units/currencies
-            from_unit = from_unit.strip()
-            to_unit = to_unit.strip()
             rate_unit = rate_unit.strip()
+            from_unit = from_unit.strip() if from_unit else ""
+            to_unit = to_unit.strip()
             
-            # Normalize from_unit (might be currency or unit)
-            from_unit_lower = from_unit.lower()
-            if from_unit_lower in self.currency_names:
-                from_unit = self.currency_names[from_unit_lower]
-            elif from_unit.upper() in self.currency_symbols.values():
-                from_unit = from_unit.upper()
-            # Check for common currency misspellings
-            elif from_unit_lower in ["dollar", "dollars", "dallar", "dollor", "dollors", "dolar"]:
-                from_unit = "USD"
-            elif from_unit_lower in ["euro", "euros", "eur", "euos"]:
-                from_unit = "EUR"
+            # If we have a currency symbol, the from_unit is the currency
+            # Otherwise, check if from_unit might be a currency
+            if is_currency_value:
+                from_unit = currency_code
+            else:
+                # Normalize from_unit (might be currency or unit)
+                from_unit_lower = from_unit.lower()
+                if from_unit_lower in self.currency_names:
+                    from_unit = self.currency_names[from_unit_lower]
+                elif from_unit.upper() in self.currency_symbols.values():
+                    from_unit = from_unit.upper()
+                # Check for common currency misspellings
+                elif from_unit_lower in ["dollar", "dollars", "dallar", "dollor", "dollors", "dolar"]:
+                    from_unit = "USD"
+                elif from_unit_lower in ["euro", "euros", "eur", "euos"]:
+                    from_unit = "EUR"
                 
             # Normalize to_unit (might be currency or unit)
             to_unit_lower = to_unit.lower()

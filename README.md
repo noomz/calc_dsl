@@ -5,6 +5,7 @@ A domain-specific language for performing various calculation tasks, including:
 - Time calculations with flexible time format support
 - Unit conversions
 - Currency conversions
+- Derived unit calculations (e.g., pricing rates like $2/ml)
 - Mathematical operations with natural language support
 - Variables and persistence
 - Multiple interfaces (CLI, Web API)
@@ -28,6 +29,13 @@ A domain-specific language for performing various calculation tasks, including:
   - `$10 to €`
   - `£25 to JPY`
   - `50 EUR to $`
+
+### Derived Unit Calculator
+- Create and use rates that combine currencies and physical units
+- Useful for pricing, rates, and unit economics calculations
+- Examples:
+  - `x = $2/ml` (define a rate of $2 per milliliter)
+  - `given x; find 10oz in dollar` (convert 10 ounces to dollars using rate x)
 
 ### Math Calculator
 - Support for traditional syntax: `5 + 3`, `7 * 8`
@@ -150,6 +158,14 @@ poetry run server
 $10 to €                   → 8.50 EUR
 £25 to JPY                 → 3600.00 JPY
 50 EUR to $                → 58.82 USD
+```
+
+### Derived Unit Conversions
+```
+x = $2/ml                  → 2 USD/ml
+given x; find 10oz in dollar → 590.59 USD  (10 fluid ounces at $2/ml)
+y = 5 EUR/km               → 5 EUR/km
+given y; find 10miles in euro → 80.47 EUR  (10 miles at 5 EUR/km)
 ```
 
 ### Math Expressions

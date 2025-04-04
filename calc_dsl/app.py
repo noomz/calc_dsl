@@ -348,6 +348,17 @@ class UnitCalculator(CalculatorInterface):
 
     def __init__(self):
         self.ureg = UnitRegistry()
+        # Register currency units with the unit registry
+        self.ureg.define('USD = [currency] = dollar')
+        self.ureg.define('EUR = 0.85 * USD = euro')
+        self.ureg.define('GBP = 0.75 * USD = pound')
+        self.ureg.define('JPY = 108 * USD = yen')
+        self.ureg.define('CAD = 1.25 * USD = canadian_dollar')
+        self.ureg.define('AUD = 1.35 * USD = australian_dollar')
+        self.ureg.define('CNY = 6.45 * USD = yuan')
+        self.ureg.define('INR = 75.0 * USD = rupee')
+        self.ureg.define('THB = 33.5 * USD = baht')
+        
         self.Q_ = self.ureg.Quantity
 
     def parse(self, query: str) -> Tuple[Optional[Any], Optional[str]]:
@@ -374,6 +385,168 @@ class UnitCalculator(CalculatorInterface):
             return None, f"Invalid number '{value_str}' in unit conversion."
         except Exception as e:
             return None, f"An unexpected error during unit conversion: {e}"
+
+
+class DerivedUnitCalculator(CalculatorInterface):
+    """Calculator for derived units combining currency and measurements.
+    
+    Support for expressions like "$2/ml" or "10 EUR/km" and conversions between them.
+    """
+    
+    # Pattern for assigning derived unit rate: "x = $2/ml" or "x = 5 USD/km"
+    # Captures: value, currency symbol or code, unit
+    derived_unit_pattern = re.compile(
+        r"^\s*([\d\.\-]+)\s*([$€£¥]|[A-Z]{3})\s*\/\s*([\w\s]+?)\s*$", re.IGNORECASE
+    )
+    
+    # Pattern for converting with derived rate: "given x; find 10oz in dollar"
+    # Captures: variable_name, value, unit, currency
+    conversion_pattern = re.compile(
+        r"^\s*given\s+([a-zA-Z_][a-zA-Z0-9_]*)\s*;\s*find\s+([\d\.\-]+)\s*([\w\s]+?)\s+in\s+([\w\s]+?)\s*$", 
+        re.IGNORECASE
+    )
+    
+    # Currency symbols to codes mapping
+    currency_symbols = {
+        "$": "USD",
+        "€": "EUR",
+        "£": "GBP",
+        "¥": "JPY",
+        "₹": "INR",
+    }
+    
+    # Currency names to codes mapping
+    currency_names = {
+        "dollar": "USD",
+        "dollars": "USD",
+        "euro": "EUR",
+        "euros": "EUR", 
+        "pound": "GBP",
+        "pounds": "GBP",
+        "yen": "JPY",
+        "baht": "THB",
+        "rupee": "INR",
+        "rupees": "INR",
+        "yuan": "CNY",
+    }
+    
+    def __init__(self):
+        # Share the unit registry with UnitCalculator
+        self.ureg = UnitCalculator().ureg
+        self.Q_ = self.ureg.Quantity
+        self.currency_calculator = CurrencyCalculator()
+    
+    def parse(self, query: str) -> Tuple[Optional[Any], Optional[str]]:
+        # Check for the derived unit pattern - just parse and return info
+        # Assignment will be handled separately
+        match = self.derived_unit_pattern.match(query)
+        if match:
+            value_str, currency, unit = match.groups()
+            
+            # Normalize currency to code if it's a symbol
+            if currency in self.currency_symbols:
+                currency_code = self.currency_symbols[currency]
+            else:
+                currency_code = currency.upper()
+                
+            try:
+                value = float(value_str)
+                
+                # Build the rate as a string representation of the derived unit
+                rate_str = f"{value} {currency_code}/{unit}"
+                
+                # Attempt to create a Pint Quantity to validate
+                quantity = self.Q_(rate_str)
+                
+                # Return the derived unit representation
+                return rate_str, None
+            except Exception as e:
+                return None, f"Error creating derived unit: {e}"
+        
+        # Check for the conversion pattern using a derived unit rate
+        match = self.conversion_pattern.match(query)
+        if match:
+            var_name, value_str, from_unit, to_currency = match.groups()
+            
+            # Normalize currency name to code
+            if to_currency.lower() in self.currency_names:
+                to_currency_code = self.currency_names[to_currency.lower()]
+            else:
+                to_currency_code = to_currency.upper()
+                
+            try:
+                value = float(value_str)
+                
+                # This is a special response object that will be processed by
+                # the calculate_in_session function, which has access to variables
+                return {
+                    "type": "derived_conversion", 
+                    "var_name": var_name, 
+                    "value": value, 
+                    "unit": from_unit.strip(), 
+                    "currency": to_currency_code
+                }, None
+            except ValueError:
+                return None, f"Invalid number '{value_str}' in derived unit conversion."
+        
+        return None, None
+        
+    def process_derived_conversion(self, rate_info: str, value: float, 
+                                from_unit: str, to_currency: str) -> Tuple[Optional[Any], Optional[str]]:
+        """Process a derived unit conversion using a stored rate.
+        
+        Args:
+            rate_info: The rate string (e.g., "2 USD/ml")
+            value: The value to convert
+            from_unit: The unit to convert from
+            to_currency: The currency to convert to
+        
+        Returns:
+            The conversion result and any error message
+        """
+        try:
+            # Parse the rate information
+            if not isinstance(rate_info, str):
+                return None, "Invalid rate information (not a string)"
+                
+            # Extract rate parts: value, currency, unit
+            rate_match = re.match(r"^([\d\.\-]+)\s+([A-Z]{3})\/(.+)$", rate_info)
+            if not rate_match:
+                return None, f"Unable to parse rate information: {rate_info}"
+                
+            rate_value, rate_currency, rate_unit = rate_match.groups()
+            rate_value = float(rate_value)
+            
+            # Convert the input value from its units to the rate's units
+            # This creates a quantity with the input units
+            try:
+                quantity = self.Q_(value, from_unit)
+                # Convert to the rate's units
+                quantity_in_rate_units = quantity.to(rate_unit)
+                # Get the magnitude in the rate's units
+                amount_in_rate_units = quantity_in_rate_units.magnitude
+            except Exception as e:
+                return None, f"Unit conversion error: {e}"
+            
+            # Calculate the currency amount based on the rate
+            currency_amount = amount_in_rate_units * rate_value
+            
+            # If the currency in the rate is different from the target currency, convert it
+            if rate_currency != to_currency:
+                # Attempt currency conversion
+                conversion_result, error = self.currency_calculator._convert_currency(
+                    currency_amount, rate_currency, to_currency
+                )
+                if error:
+                    return None, error
+                currency_amount = conversion_result
+            
+            # Format output: "X.XX CURRENCY"
+            result = f"{currency_amount:.2f} {to_currency}"
+            
+            return result, None
+        except Exception as e:
+            return None, f"Error during derived unit conversion: {e}"
 
 
 class CurrencyCalculator(CalculatorInterface):
@@ -859,6 +1032,7 @@ app.config["DEBUG"] = DEBUG_MODE
 # This ensures that more specific patterns take precedence over more general ones
 REGISTERED_CALCULATORS = [
     TimeCalculator(),  # Time calculations like "9am - 5pm" or "9:30 - 10:45 in minutes"
+    DerivedUnitCalculator(),  # Derived unit conversions like "$2/ml" or "given x; find 10oz in dollar"
     CurrencyCalculator(),  # Currency conversions like "10 USD to EUR", "$10 to €", etc.
     UnitCalculator(),  # Unit conversions like "5 km to miles" 
     MathCalculator(),  # Math operations including natural language like "3 power of 2", "square root of 9", "2% of 100"
@@ -1124,12 +1298,52 @@ def calculate_in_session(session_id):
                 )
                 break  # Stop trying other calculators if one matched format but failed
             elif result is not None:
-                # Calculator successfully parsed and returned a result
-                calculated_result = result
-                logger.info(
-                    f"Session {session_id}: Calculator {type(calculator).__name__} succeeded for expression '{expression_to_evaluate}'. Result: {result}"
-                )
-                break  # Stop trying once a calculator succeeds
+                # Special handling for derived unit conversions
+                if isinstance(result, dict) and result.get("type") == "derived_conversion":
+                    # This is a derived unit conversion request like "given x; find 10oz in dollar"
+                    derived_info = result
+                    var_name = derived_info["var_name"]
+                    
+                    # Check if the variable exists
+                    if var_name not in variables:
+                        evaluation_error = f"Variable '{var_name}' is not defined"
+                        break
+                        
+                    # Get the variable's value (should be a rate string like "2 USD/ml")
+                    rate_info = variables.get(var_name)
+                    
+                    # Get the derived unit calculator to process the conversion
+                    derived_calculator = next((calc for calc in REGISTERED_CALCULATORS 
+                                            if isinstance(calc, DerivedUnitCalculator)), None)
+                    
+                    if derived_calculator:
+                        # Process the conversion
+                        conv_result, conv_error = derived_calculator.process_derived_conversion(
+                            rate_info=rate_info,
+                            value=derived_info["value"],
+                            from_unit=derived_info["unit"],
+                            to_currency=derived_info["currency"]
+                        )
+                        
+                        if conv_error:
+                            evaluation_error = conv_error
+                            break
+                        else:
+                            calculated_result = conv_result
+                            logger.info(
+                                f"Session {session_id}: Derived unit conversion succeeded. Result: {conv_result}"
+                            )
+                            break
+                    else:
+                        evaluation_error = "Internal error: Derived unit calculator not found"
+                        break
+                else:
+                    # Normal calculation result
+                    calculated_result = result
+                    logger.info(
+                        f"Session {session_id}: Calculator {type(calculator).__name__} succeeded for expression '{expression_to_evaluate}'. Result: {result}"
+                    )
+                    break  # Stop trying once a calculator succeeds
             # else: result is None and error is None, format didn't match. Continue loop.
 
         except Exception as e:
@@ -1343,6 +1557,8 @@ def run_cli_mode():
                     print("  5 km to miles   - Convert units")
                     print("  10 USD to EUR   - Convert currencies (using codes)")
                     print("  $10 to €        - Convert currencies (using symbols)")
+                    print("  x = $2/ml       - Set a derived unit rate")
+                    print("  given x; find 10oz in dollar - Convert using derived unit rate")
                     print("  3 power of 2    - Use natural language math")
                     print("  square root of 16 - Use more complex expressions")
                     print("  2% of 100       - Calculate percentages")
@@ -1476,9 +1692,46 @@ def run_cli_mode():
                             evaluation_error = error
                             break
                         elif result is not None:
-                            # Calculator successfully parsed and returned a result
-                            calculated_result = result
-                            break
+                            # Special handling for derived unit conversions
+                            if isinstance(result, dict) and result.get("type") == "derived_conversion":
+                                # This is a derived unit conversion request like "given x; find 10oz in dollar"
+                                derived_info = result
+                                var_name = derived_info["var_name"]
+                                
+                                # Check if the variable exists
+                                if var_name not in variables:
+                                    evaluation_error = f"Variable '{var_name}' is not defined"
+                                    break
+                                    
+                                # Get the variable's value (should be a rate string like "2 USD/ml")
+                                rate_info = variables.get(var_name)
+                                
+                                # Get the derived unit calculator
+                                derived_calculator = next((calc for calc in REGISTERED_CALCULATORS 
+                                                      if isinstance(calc, DerivedUnitCalculator)), None)
+                                
+                                if derived_calculator:
+                                    # Process the conversion
+                                    conv_result, conv_error = derived_calculator.process_derived_conversion(
+                                        rate_info=rate_info,
+                                        value=derived_info["value"],
+                                        from_unit=derived_info["unit"],
+                                        to_currency=derived_info["currency"]
+                                    )
+                                    
+                                    if conv_error:
+                                        evaluation_error = conv_error
+                                        break
+                                    else:
+                                        calculated_result = conv_result
+                                        break
+                                else:
+                                    evaluation_error = "Internal error: Derived unit calculator not found"
+                                    break
+                            else:
+                                # Normal calculation result
+                                calculated_result = result
+                                break
 
                     except Exception as e:
                         evaluation_error = f"An unexpected error occurred: {e}"

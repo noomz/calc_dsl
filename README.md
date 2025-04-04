@@ -7,6 +7,7 @@ A domain-specific language for performing various calculation tasks, including:
 - Currency conversions
 - Derived unit calculations (e.g., pricing rates like $2/ml)
 - Mathematical operations with natural language support
+- List operations with both scalars and other lists
 - Variables and persistence
 - Multiple interfaces (CLI, Web API)
 
@@ -46,6 +47,17 @@ A domain-specific language for performing various calculation tasks, including:
   - `square root of 9`
   - `2% of 100`
   - `factorial of 5`
+
+### List Calculator
+- Create and manipulate lists of values
+- Perform operations between lists and scalars
+- Perform element-wise operations between lists
+- Examples:
+  - `x = [1, 2, 3]` (create a list)
+  - `x * 10` → `[10, 20, 30]` (multiply each element by 10)
+  - `y = [4, 5, 6]` (create another list)
+  - `x + y` → `[5, 7, 9]` (element-wise addition)
+  - `x * y` → `[4, 10, 18]` (element-wise multiplication)
 
 ### Persistent Variables
 - Assign calculation results to variables: `x = 5 + 3`
@@ -198,6 +210,17 @@ given y; find 50euro in mile → 10.0 mile  (inverse: €50 worth at 5 EUR/km)
 square root of 16          → 4
 2% of 100                  → 2
 factorial of 5             → 120
+```
+
+### List Operations
+```
+x = [1, 2, 3]              → [1, 2, 3]
+x * 10                     → [10, 20, 30]
+y = [4, 5, 6]              → [4, 5, 6]
+x + y                      → [5, 7, 9]
+x * y                      → [4, 10, 18]
+x - 1                      → [0, 1, 2]
+x / 2                      → [0.5, 1.0, 1.5]
 ```
 
 ## Contributing

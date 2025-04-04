@@ -433,6 +433,7 @@ class DerivedUnitCalculator(CalculatorInterface):
         "pounds": "GBP",
         "yen": "JPY",
         "baht": "THB",
+        "bath": "THB",  # Common misspelling of baht
         "rupee": "INR",
         "rupees": "INR",
         "yuan": "CNY",
@@ -595,7 +596,9 @@ class DerivedUnitCalculator(CalculatorInterface):
                     currency_amount, rate_currency, to_currency
                 )
                 if conversion_result is None:
-                    return None, f"Could not convert from {rate_currency} to {to_currency}"
+                    # Provide a more helpful error message with supported currencies
+                    supported_currencies = ", ".join(sorted([code for code in self.currency_calculator.currency_names.values()]))
+                    return None, f"Could not convert from {rate_currency} to {to_currency}. Supported currencies: {supported_currencies}"
                 currency_amount = conversion_result
             
             # Format output: "X.XX CURRENCY"
@@ -658,6 +661,7 @@ class CurrencyCalculator(CalculatorInterface):
         "pounds": "GBP",
         "yen": "JPY",
         "baht": "THB",
+        "bath": "THB",  # Common misspelling of baht
         "rupee": "INR",
         "rupees": "INR",
         "franc": "CHF",

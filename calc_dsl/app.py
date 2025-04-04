@@ -492,16 +492,28 @@ class DerivedUnitCalculator(CalculatorInterface):
             to_unit = to_unit.strip()
             
             # Check if from_unit might be a currency
-            if from_unit.lower() in self.currency_names:
-                from_unit = self.currency_names[from_unit.lower()]
+            from_unit_lower = from_unit.lower()
+            if from_unit_lower in self.currency_names:
+                from_unit = self.currency_names[from_unit_lower]
             elif from_unit.upper() in self.currency_symbols.values():
                 from_unit = from_unit.upper()
+            # Check for common currency misspellings
+            elif from_unit_lower in ["dollar", "dollars", "dallar", "dollor", "dollors", "dolar"]:
+                from_unit = "USD"
+            elif from_unit_lower in ["euro", "euros", "eur", "euos"]:
+                from_unit = "EUR"
                 
             # Check if to_unit might be a currency
-            if to_unit.lower() in self.currency_names:
-                to_unit = self.currency_names[to_unit.lower()]
+            to_unit_lower = to_unit.lower()
+            if to_unit_lower in self.currency_names:
+                to_unit = self.currency_names[to_unit_lower]
             elif to_unit.upper() in self.currency_symbols.values():
                 to_unit = to_unit.upper()
+            # Check for common currency misspellings
+            elif to_unit_lower in ["dollar", "dollars", "dallar", "dollor", "dollors", "dolar"]:
+                to_unit = "USD"
+            elif to_unit_lower in ["euro", "euros", "eur", "euos"]:
+                to_unit = "EUR"
                 
             try:
                 value = float(value_str)
@@ -530,16 +542,28 @@ class DerivedUnitCalculator(CalculatorInterface):
             rate_unit = rate_unit.strip()
             
             # Normalize from_unit (might be currency or unit)
-            if from_unit.lower() in self.currency_names:
-                from_unit = self.currency_names[from_unit.lower()]
+            from_unit_lower = from_unit.lower()
+            if from_unit_lower in self.currency_names:
+                from_unit = self.currency_names[from_unit_lower]
             elif from_unit.upper() in self.currency_symbols.values():
                 from_unit = from_unit.upper()
+            # Check for common currency misspellings
+            elif from_unit_lower in ["dollar", "dollars", "dallar", "dollor", "dollors", "dolar"]:
+                from_unit = "USD"
+            elif from_unit_lower in ["euro", "euros", "eur", "euos"]:
+                from_unit = "EUR"
                 
             # Normalize to_unit (might be currency or unit)
-            if to_unit.lower() in self.currency_names:
-                to_unit = self.currency_names[to_unit.lower()]
+            to_unit_lower = to_unit.lower()
+            if to_unit_lower in self.currency_names:
+                to_unit = self.currency_names[to_unit_lower]
             elif to_unit.upper() in self.currency_symbols.values():
                 to_unit = to_unit.upper()
+            # Check for common currency misspellings
+            elif to_unit_lower in ["dollar", "dollars", "dallar", "dollor", "dollors", "dolar"]:
+                to_unit = "USD"
+            elif to_unit_lower in ["euro", "euros", "eur", "euos"]:
+                to_unit = "EUR"
                 
             try:
                 rate_value = float(rate_value_str)
@@ -606,7 +630,20 @@ class DerivedUnitCalculator(CalculatorInterface):
                     rate_value, rate_currency, rate_unit
                 )
             else:
-                return None, f"Incompatible units for conversion: cannot convert between {from_unit} and {to_currency} using rate {rate_info}"
+                # Improved error message with suggestions
+                is_from_currency = from_unit in self.currency_symbols.values() or any(from_unit == code for code in self.currency_names.values())
+                is_to_currency = to_currency in self.currency_symbols.values() or any(to_currency == code for code in self.currency_names.values())
+                
+                if is_from_currency and is_to_currency:
+                    # Both are currencies
+                    return None, f"Cannot convert between currencies {from_unit} and {to_currency} using a derived unit rate. Use 'x {from_unit} to {to_currency}' instead."
+                elif not is_from_currency and not is_to_currency:
+                    # Both are units
+                    return None, f"Cannot convert between units {from_unit} and {to_currency} using a derived unit rate. Use 'x {from_unit} to {to_currency}' instead."
+                else:
+                    # One is a currency, one is a unit, but incompatible with the rate
+                    rate_description = f"{rate_value} {rate_currency}/{rate_unit}"
+                    return None, f"Incompatible units for conversion: cannot convert between {from_unit} and {to_currency} using rate {rate_description}. The rate connects {rate_currency} and {rate_unit}."
                 
         except Exception as e:
             return None, f"Error during derived unit conversion: {e}"

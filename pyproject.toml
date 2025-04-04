@@ -1,7 +1,7 @@
 [tool.poetry]
 name = "calc_dsl"
 version = "0.1.0"
-description = "A calculator domain-specific language with support for time calculations, unit conversions, and natural language math operations"
+description = "A calculator domain-specific language with support for time calculations, unit conversions, currency conversions, and natural language math operations"
 authors = ["Your Name <your.email@example.com>"]
 readme = "README.md"
 
@@ -9,6 +9,7 @@ readme = "README.md"
 python = ">=3.9,<3.14"
 flask = "^2.3.3"
 pint = "^0.22"
+requests = "^2.31.0"
 # readline is typically built into Python on Unix systems
 pyreadline3 = {version = "^3.4.1", markers = "platform_system == 'Windows'"}
 

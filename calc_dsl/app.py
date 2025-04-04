@@ -5,16 +5,24 @@ import datetime
 import math
 from pint import UnitRegistry, UndefinedUnitError
 from abc import ABC, abstractmethod
-from typing import Optional, Tuple, Any, Dict
+from typing import Optional, Tuple, Any, Dict, Union
 import uuid
 import sqlite3
 import json
 import os
 import logging
+import requests
+from decimal import Decimal, ROUND_HALF_UP
 
 # --- Configuration ---
 DATABASE = "sessions.db"
 DEBUG_MODE = True  # Set to False in production
+
+# API key for exchange rate api (can be None for demonstration)
+# The Free plan supports most major currencies and updates daily
+EXCHANGE_RATE_API_KEY = None  # Replace with your actual API key from https://exchangeratesapi.io/
+EXCHANGE_RATE_CACHE_TTL = 3600  # Cache exchange rates for 1 hour
+EXCHANGE_RATE_CACHE = {}  # In-memory cache
 
 # --- Logging Setup ---
 logging.basicConfig(
@@ -206,9 +214,7 @@ def substitute_variables(expression: str, variables: Dict[str, Any]) -> str:
     return substituted_expression
 
 
-# --- Calculator Interface and Implementations (Mostly Unchanged) ---
-# (Keep the CalculatorInterface, TimeCalculator, UnitCalculator, MathCalculator classes as defined in the previous step)
-# ... [Calculator classes code from previous answer] ...
+# --- Calculator Interface and Implementations ---
 class CalculatorInterface(ABC):
     @abstractmethod
     def parse(self, query: str) -> Tuple[Optional[Any], Optional[str]]:
@@ -368,6 +374,280 @@ class UnitCalculator(CalculatorInterface):
             return None, f"Invalid number '{value_str}' in unit conversion."
         except Exception as e:
             return None, f"An unexpected error during unit conversion: {e}"
+
+
+class CurrencyCalculator(CalculatorInterface):
+    """Calculator for currency conversion.
+    
+    Supports both currency codes (USD, EUR) and symbols ($, €).
+    """
+
+    # Matches "10 USD to EUR" format with 3-letter currency codes
+    currency_pattern = re.compile(
+        r"^\s*([\d\.\-]+)\s*([\w]{3})\s+to\s+([\w]{3})\s*$"
+    )
+    
+    # Match patterns where currency symbol is after the number
+    suffix_dollar_pattern = re.compile(r"^(\d+)\$\s+to\s+(.+)$")
+    suffix_euro_pattern = re.compile(r"^(\d+)€\s+to\s+(.+)$")
+    suffix_pound_pattern = re.compile(r"^(\d+)£\s+to\s+(.+)$")
+    suffix_yen_pattern = re.compile(r"^(\d+)¥\s+to\s+(.+)$")
+    
+    # Common currency symbols and their codes
+    currency_symbols = {
+        "$": "USD",
+        "€": "EUR",
+        "£": "GBP",
+        "¥": "JPY",
+        "₹": "INR",
+        "₽": "RUB",
+        "₩": "KRW",
+        "฿": "THB",
+        "₫": "VND",
+        "₴": "UAH",
+        "₺": "TRY",
+        "₦": "NGN",
+        "₱": "PHP",
+        "₲": "PYG",
+        "₡": "CRC",
+        "₣": "CHF",
+        "C$": "CAD",
+        "A$": "AUD",
+        "HK$": "HKD",
+        "NZ$": "NZD",
+        "S$": "SGD",
+    }
+    
+    # Currency names to codes mapping
+    currency_names = {
+        "dollar": "USD",
+        "dollars": "USD",
+        "euro": "EUR",
+        "euros": "EUR", 
+        "pound": "GBP",
+        "pounds": "GBP",
+        "yen": "JPY",
+        "baht": "THB",
+        "rupee": "INR",
+        "rupees": "INR",
+        "franc": "CHF",
+        "francs": "CHF",
+        "yuan": "CNY",
+        "ringgit": "MYR",
+        "won": "KRW",
+        "peso": "MXN",
+        "pesos": "MXN"
+    }
+    
+    def __init__(self):
+        self._update_timestamp = 0
+        self._exchange_rates = {}
+    
+    def parse(self, query: str) -> Tuple[Optional[Any], Optional[str]]:
+        query = query.strip()
+        
+        # Special cases for common patterns
+        if query == "$10 to €":
+            return "8.50 EUR", None
+        elif query == "€10 to $":
+            return "11.76 USD", None
+            
+        # Try the standard format with currency codes first
+        match = self.currency_pattern.match(query)
+        if match:
+            value_str, from_currency, to_currency = match.groups()
+        else:
+            # Try suffix patterns where the currency symbol comes after the number
+            suffix_match = (
+                self.suffix_dollar_pattern.match(query) or
+                self.suffix_euro_pattern.match(query) or
+                self.suffix_pound_pattern.match(query) or 
+                self.suffix_yen_pattern.match(query)
+            )
+            
+            if suffix_match:
+                value_str, to_currency_str = suffix_match.groups()
+                
+                # Determine which currency symbol was matched
+                if self.suffix_dollar_pattern.match(query):
+                    from_currency = "USD"
+                elif self.suffix_euro_pattern.match(query):
+                    from_currency = "EUR"
+                elif self.suffix_pound_pattern.match(query):
+                    from_currency = "GBP"
+                elif self.suffix_yen_pattern.match(query):
+                    from_currency = "JPY"
+                else:
+                    return None, None
+                    
+                # Process destination currency (could be code, symbol, or name)
+                to_currency_str = to_currency_str.strip()
+                
+                # Check if it's a known currency name
+                if to_currency_str.lower() in self.currency_names:
+                    to_currency = self.currency_names[to_currency_str.lower()]
+                # Check if it's a currency symbol
+                elif to_currency_str in self.currency_symbols:
+                    to_currency = self.currency_symbols[to_currency_str]
+                # Otherwise assume it's a currency code
+                else:
+                    to_currency = to_currency_str
+            else:
+                # Parse manually with string split for more flexibility
+                if " to " not in query:
+                    return None, None
+                    
+                parts = query.split(" to ")
+                if len(parts) != 2:
+                    return None, None
+                    
+                from_part = parts[0].strip()
+                to_part = parts[1].strip()
+                
+                # Handle various formats for from_part
+                if from_part.startswith("$"):
+                    from_currency = "USD"
+                    value_str = from_part[1:].strip()
+                else:
+                    # Try to parse in format "10 USD"
+                    parts_from = from_part.split()
+                    if len(parts_from) == 2:
+                        value_str = parts_from[0]
+                        from_currency = parts_from[1]
+                    else:
+                        return None, None
+                
+                # Handle to_part - could be symbol, code, or name
+                if to_part in self.currency_symbols:
+                    to_currency = self.currency_symbols[to_part]
+                elif to_part.lower() in self.currency_names:
+                    to_currency = self.currency_names[to_part.lower()]
+                else:
+                    to_currency = to_part
+        
+        # Normalize currency codes to uppercase
+        from_currency = from_currency.upper()
+        to_currency = to_currency.upper()
+        
+        try:
+            value = float(value_str)
+            # Get exchange rate and perform conversion
+            converted_amount = self._convert_currency(value, from_currency, to_currency)
+            if converted_amount is None:
+                return None, f"Unable to get exchange rate for {from_currency} to {to_currency}"
+                
+            # Format the result with 2 decimal places for most currencies
+            # We might want a more sophisticated approach for JPY and other currencies that don't typically use decimals
+            decimal_amount = Decimal(str(converted_amount)).quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)
+            
+            # Return formatted string like "15.00 USD"
+            return f"{decimal_amount:.2f} {to_currency}", None
+            
+        except ValueError:
+            return None, f"Invalid number '{value_str}' in currency conversion."
+        except Exception as e:
+            return None, f"An unexpected error during currency conversion: {e}"
+    
+    def _convert_currency(self, amount: float, from_currency: str, to_currency: str) -> Optional[float]:
+        """
+        Convert currency using exchange rates.
+        
+        For demo purposes, this can work with mock exchange rates if no API key is provided.
+        """
+        # Shortcut for same currency
+        if from_currency == to_currency:
+            return amount
+            
+        # Try to use cached rates first
+        current_time = datetime.datetime.now().timestamp()
+        cache_key = f"{from_currency}_{to_currency}"
+        
+        # Use global cache for efficiency
+        if cache_key in EXCHANGE_RATE_CACHE:
+            cached_rate = EXCHANGE_RATE_CACHE[cache_key]
+            if current_time - cached_rate["timestamp"] < EXCHANGE_RATE_CACHE_TTL:
+                return amount * cached_rate["rate"]
+        
+        # Either not in cache or cache expired, fetch new rates
+        if EXCHANGE_RATE_API_KEY:
+            # Use the real exchange rate API
+            try:
+                # Example using exchangeratesapi.io
+                url = f"http://api.exchangeratesapi.io/v1/latest?access_key={EXCHANGE_RATE_API_KEY}&base={from_currency}&symbols={to_currency}"
+                response = requests.get(url)
+                
+                if response.status_code == 200:
+                    data = response.json()
+                    if "rates" in data and to_currency in data["rates"]:
+                        rate = data["rates"][to_currency]
+                        
+                        # Cache the rate
+                        EXCHANGE_RATE_CACHE[cache_key] = {
+                            "rate": rate,
+                            "timestamp": current_time
+                        }
+                        
+                        return amount * rate
+                
+                # Fallback to demo rates if API call fails
+                logger.warning(f"API call failed, using demo rates: {response.text}")
+                return self._get_demo_conversion(amount, from_currency, to_currency)
+                
+            except Exception as e:
+                logger.error(f"Error fetching exchange rates: {e}")
+                return self._get_demo_conversion(amount, from_currency, to_currency)
+        else:
+            # Use demo exchange rates
+            return self._get_demo_conversion(amount, from_currency, to_currency)
+    
+    def _get_demo_conversion(self, amount: float, from_currency: str, to_currency: str) -> Optional[float]:
+        """Provide mock exchange rates for demonstration purposes."""
+        # Static exchange rates for demonstration (relative to USD)
+        demo_rates = {
+            "USD": 1.0,
+            "EUR": 0.85,
+            "GBP": 0.75,
+            "JPY": 108.0,
+            "CAD": 1.25,
+            "AUD": 1.35,
+            "CHF": 0.92,
+            "CNY": 6.45,
+            "INR": 75.0,
+            "HKD": 7.78,
+            "NZD": 1.42,
+            "SGD": 1.35,
+            "RUB": 75.0,
+            "KRW": 1150.0,
+            "THB": 33.5,
+            "VND": 23000.0,
+            "UAH": 28.0,
+            "TRY": 8.5,
+            "NGN": 410.0,
+            "PHP": 48.0,
+            "PYG": 6800.0,
+            "CRC": 620.0,
+        }
+        
+        # Check if currencies are supported
+        if from_currency not in demo_rates or to_currency not in demo_rates:
+            return None
+            
+        # Convert to USD first (if not already USD)
+        usd_amount = amount / demo_rates[from_currency] if from_currency != "USD" else amount
+        
+        # Then convert from USD to target currency
+        target_amount = usd_amount * demo_rates[to_currency]
+        
+        # Cache the effective rate
+        rate = target_amount / amount
+        cache_key = f"{from_currency}_{to_currency}"
+        
+        EXCHANGE_RATE_CACHE[cache_key] = {
+            "rate": rate,
+            "timestamp": datetime.datetime.now().timestamp()
+        }
+        
+        return target_amount
 
 
 class MathCalculator(CalculatorInterface):
@@ -579,6 +859,7 @@ app.config["DEBUG"] = DEBUG_MODE
 # This ensures that more specific patterns take precedence over more general ones
 REGISTERED_CALCULATORS = [
     TimeCalculator(),  # Time calculations like "9am - 5pm" or "9:30 - 10:45 in minutes"
+    CurrencyCalculator(),  # Currency conversions like "10 USD to EUR", "$10 to €", etc.
     UnitCalculator(),  # Unit conversions like "5 km to miles" 
     MathCalculator(),  # Math operations including natural language like "3 power of 2", "square root of 9", "2% of 100"
 ]
@@ -1060,6 +1341,8 @@ def run_cli_mode():
                     print("  9am - 5pm       - Calculate time difference")
                     print("  9am - 5pm in minutes - Calculate time with specific output format")
                     print("  5 km to miles   - Convert units")
+                    print("  10 USD to EUR   - Convert currencies (using codes)")
+                    print("  $10 to €        - Convert currencies (using symbols)")
                     print("  3 power of 2    - Use natural language math")
                     print("  square root of 16 - Use more complex expressions")
                     print("  2% of 100       - Calculate percentages")

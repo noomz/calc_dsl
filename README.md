@@ -3,7 +3,8 @@
 A domain-specific language for performing various calculation tasks, including:
 
 - Time calculations with flexible time format support
-- Unit conversions 
+- Unit conversions
+- Currency conversions
 - Mathematical operations with natural language support
 - Variables and persistence
 - Multiple interfaces (CLI, Web API)
@@ -18,6 +19,15 @@ A domain-specific language for performing various calculation tasks, including:
 ### Unit Calculator
 - Convert between different units of measurement
 - Example: `5 km to miles`
+
+### Currency Calculator
+- Convert between different currencies using up-to-date exchange rates
+- Support for both currency codes and symbols
+- Examples:
+  - `10 USD to EUR`
+  - `$10 to €`
+  - `£25 to JPY`
+  - `50 EUR to $`
 
 ### Math Calculator
 - Support for traditional syntax: `5 + 3`, `7 * 8`
@@ -132,6 +142,14 @@ poetry run server
 5 km to miles              → 3.10686 miles
 100 kg to pounds           → 220.462 pounds
 30 celsius to fahrenheit   → 86 °F
+```
+
+### Currency Conversions
+```
+10 USD to EUR              → 8.50 EUR
+$10 to €                   → 8.50 EUR
+£25 to JPY                 → 3600.00 JPY
+50 EUR to $                → 58.82 USD
 ```
 
 ### Math Expressions

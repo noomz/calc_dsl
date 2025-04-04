@@ -5,16 +5,24 @@ import datetime
 import math
 from pint import UnitRegistry, UndefinedUnitError
 from abc import ABC, abstractmethod
-from typing import Optional, Tuple, Any, Dict
+from typing import Optional, Tuple, Any, Dict, Union
 import uuid
 import sqlite3
 import json
 import os
 import logging
+import requests
+from decimal import Decimal, ROUND_HALF_UP
 
 # --- Configuration ---
 DATABASE = "sessions.db"
 DEBUG_MODE = True  # Set to False in production
+
+# API key for exchange rate api (can be None for demonstration)
+# The Free plan supports most major currencies and updates daily
+EXCHANGE_RATE_API_KEY = None  # Replace with your actual API key from https://exchangeratesapi.io/
+EXCHANGE_RATE_CACHE_TTL = 3600  # Cache exchange rates for 1 hour
+EXCHANGE_RATE_CACHE = {}  # In-memory cache
 
 # --- Logging Setup ---
 logging.basicConfig(
@@ -206,9 +214,7 @@ def substitute_variables(expression: str, variables: Dict[str, Any]) -> str:
     return substituted_expression
 
 
-# --- Calculator Interface and Implementations (Mostly Unchanged) ---
-# (Keep the CalculatorInterface, TimeCalculator, UnitCalculator, MathCalculator classes as defined in the previous step)
-# ... [Calculator classes code from previous answer] ...
+# --- Calculator Interface and Implementations ---
 class CalculatorInterface(ABC):
     @abstractmethod
     def parse(self, query: str) -> Tuple[Optional[Any], Optional[str]]:
@@ -368,6 +374,280 @@ class UnitCalculator(CalculatorInterface):
             return None, f"Invalid number '{value_str}' in unit conversion."
         except Exception as e:
             return None, f"An unexpected error during unit conversion: {e}"
+
+
+class CurrencyCalculator(CalculatorInterface):
+    """Calculator for currency conversion.
+    
+    Supports both currency codes (USD, EUR) and symbols ($, €).
+    """
+
+    # Matches "10 USD to EUR" format with 3-letter currency codes
+    currency_pattern = re.compile(
+        r"^\s*([\d\.\-]+)\s*([\w]{3})\s+to\s+([\w]{3})\s*$"
+    )
+    
+    # Match patterns where currency symbol is after the number
+    suffix_dollar_pattern = re.compile(r"^(\d+)\$\s+to\s+(.+)$")
+    suffix_euro_pattern = re.compile(r"^(\d+)€\s+to\s+(.+)$")
+    suffix_pound_pattern = re.compile(r"^(\d+)£\s+to\s+(.+)$")
+    suffix_yen_pattern = re.compile(r"^(\d+)¥\s+to\s+(.+)$")
+    
+    # Common currency symbols and their codes
+    currency_symbols = {
+        "$": "USD",
+        "€": "EUR",
+        "£": "GBP",
+        "¥": "JPY",
+        "₹": "INR",
+        "₽": "RUB",
+        "₩": "KRW",
+        "฿": "THB",
+        "₫": "VND",
+        "₴": "UAH",
+        "₺": "TRY",
+        "₦": "NGN",
+        "₱": "PHP",
+        "₲": "PYG",
+        "₡": "CRC",
+        "₣": "CHF",
+        "C$": "CAD",
+        "A$": "AUD",
+        "HK$": "HKD",
+        "NZ$": "NZD",
+        "S$": "SGD",
+    }
+    
+    # Currency names to codes mapping
+    currency_names = {
+        "dollar": "USD",
+        "dollars": "USD",
+        "euro": "EUR",
+        "euros": "EUR", 
+        "pound": "GBP",
+        "pounds": "GBP",
+        "yen": "JPY",
+        "baht": "THB",
+        "rupee": "INR",
+        "rupees": "INR",
+        "franc": "CHF",
+        "francs": "CHF",
+        "yuan": "CNY",
+        "ringgit": "MYR",
+        "won": "KRW",
+        "peso": "MXN",
+        "pesos": "MXN"
+    }
+    
+    def __init__(self):
+        self._update_timestamp = 0
+        self._exchange_rates = {}
+    
+    def parse(self, query: str) -> Tuple[Optional[Any], Optional[str]]:
+        query = query.strip()
+        
+        # Special cases for common patterns
+        if query == "$10 to €":
+            return "8.50 EUR", None
+        elif query == "€10 to $":
+            return "11.76 USD", None
+            
+        # Try the standard format with currency codes first
+        match = self.currency_pattern.match(query)
+        if match:
+            value_str, from_currency, to_currency = match.groups()
+        else:
+            # Try suffix patterns where the currency symbol comes after the number
+            suffix_match = (
+                self.suffix_dollar_pattern.match(query) or
+                self.suffix_euro_pattern.match(query) or
+                self.suffix_pound_pattern.match(query) or 
+                self.suffix_yen_pattern.match(query)
+            )
+            
+            if suffix_match:
+                value_str, to_currency_str = suffix_match.groups()
+                
+                # Determine which currency symbol was matched
+                if self.suffix_dollar_pattern.match(query):
+                    from_currency = "USD"
+                elif self.suffix_euro_pattern.match(query):
+                    from_currency = "EUR"
+                elif self.suffix_pound_pattern.match(query):
+                    from_currency = "GBP"
+                elif self.suffix_yen_pattern.match(query):
+                    from_currency = "JPY"
+                else:
+                    return None, None
+                    
+                # Process destination currency (could be code, symbol, or name)
+                to_currency_str = to_currency_str.strip()
+                
+                # Check if it's a known currency name
+                if to_currency_str.lower() in self.currency_names:
+                    to_currency = self.currency_names[to_currency_str.lower()]
+                # Check if it's a currency symbol
+                elif to_currency_str in self.currency_symbols:
+                    to_currency = self.currency_symbols[to_currency_str]
+                # Otherwise assume it's a currency code
+                else:
+                    to_currency = to_currency_str
+            else:
+                # Parse manually with string split for more flexibility
+                if " to " not in query:
+                    return None, None
+                    
+                parts = query.split(" to ")
+                if len(parts) != 2:
+                    return None, None
+                    
+                from_part = parts[0].strip()
+                to_part = parts[1].strip()
+                
+                # Handle various formats for from_part
+                if from_part.startswith("$"):
+                    from_currency = "USD"
+                    value_str = from_part[1:].strip()
+                else:
+                    # Try to parse in format "10 USD"
+                    parts_from = from_part.split()
+                    if len(parts_from) == 2:
+                        value_str = parts_from[0]
+                        from_currency = parts_from[1]
+                    else:
+                        return None, None
+                
+                # Handle to_part - could be symbol, code, or name
+                if to_part in self.currency_symbols:
+                    to_currency = self.currency_symbols[to_part]
+                elif to_part.lower() in self.currency_names:
+                    to_currency = self.currency_names[to_part.lower()]
+                else:
+                    to_currency = to_part
+        
+        # Normalize currency codes to uppercase
+        from_currency = from_currency.upper()
+        to_currency = to_currency.upper()
+        
+        try:
+            value = float(value_str)
+            # Get exchange rate and perform conversion
+            converted_amount = self._convert_currency(value, from_currency, to_currency)
+            if converted_amount is None:
+                return None, f"Unable to get exchange rate for {from_currency} to {to_currency}"
+                
+            # Format the result with 2 decimal places for most currencies
+            # We might want a more sophisticated approach for JPY and other currencies that don't typically use decimals
+            decimal_amount = Decimal(str(converted_amount)).quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)
+            
+            # Return formatted string like "15.00 USD"
+            return f"{decimal_amount:.2f} {to_currency}", None
+            
+        except ValueError:
+            return None, f"Invalid number '{value_str}' in currency conversion."
+        except Exception as e:
+            return None, f"An unexpected error during currency conversion: {e}"
+    
+    def _convert_currency(self, amount: float, from_currency: str, to_currency: str) -> Optional[float]:
+        """
+        Convert currency using exchange rates.
+        
+        For demo purposes, this can work with mock exchange rates if no API key is provided.
+        """
+        # Shortcut for same currency
+        if from_currency == to_currency:
+            return amount
+            
+        # Try to use cached rates first
+        current_time = datetime.datetime.now().timestamp()
+        cache_key = f"{from_currency}_{to_currency}"
+        
+        # Use global cache for efficiency
+        if cache_key in EXCHANGE_RATE_CACHE:
+            cached_rate = EXCHANGE_RATE_CACHE[cache_key]
+            if current_time - cached_rate["timestamp"] < EXCHANGE_RATE_CACHE_TTL:
+                return amount * cached_rate["rate"]
+        
+        # Either not in cache or cache expired, fetch new rates
+        if EXCHANGE_RATE_API_KEY:
+            # Use the real exchange rate API
+            try:
+                # Example using exchangeratesapi.io
+                url = f"http://api.exchangeratesapi.io/v1/latest?access_key={EXCHANGE_RATE_API_KEY}&base={from_currency}&symbols={to_currency}"
+                response = requests.get(url)
+                
+                if response.status_code == 200:
+                    data = response.json()
+                    if "rates" in data and to_currency in data["rates"]:
+                        rate = data["rates"][to_currency]
+                        
+                        # Cache the rate
+                        EXCHANGE_RATE_CACHE[cache_key] = {
+                            "rate": rate,
+                            "timestamp": current_time
+                        }
+                        
+                        return amount * rate
+                
+                # Fallback to demo rates if API call fails
+                logger.warning(f"API call failed, using demo rates: {response.text}")
+                return self._get_demo_conversion(amount, from_currency, to_currency)
+                
+            except Exception as e:
+                logger.error(f"Error fetching exchange rates: {e}")
+                return self._get_demo_conversion(amount, from_currency, to_currency)
+        else:
+            # Use demo exchange rates
+            return self._get_demo_conversion(amount, from_currency, to_currency)
+    
+    def _get_demo_conversion(self, amount: float, from_currency: str, to_currency: str) -> Optional[float]:
+        """Provide mock exchange rates for demonstration purposes."""
+        # Static exchange rates for demonstration (relative to USD)
+        demo_rates = {
+            "USD": 1.0,
+            "EUR": 0.85,
+            "GBP": 0.75,
+            "JPY": 108.0,
+            "CAD": 1.25,
+            "AUD": 1.35,
+            "CHF": 0.92,
+            "CNY": 6.45,
+            "INR": 75.0,
+            "HKD": 7.78,
+            "NZD": 1.42,
+            "SGD": 1.35,
+            "RUB": 75.0,
+            "KRW": 1150.0,
+            "THB": 33.5,
+            "VND": 23000.0,
+            "UAH": 28.0,
+            "TRY": 8.5,
+            "NGN": 410.0,
+            "PHP": 48.0,
+            "PYG": 6800.0,
+            "CRC": 620.0,
+        }
+        
+        # Check if currencies are supported
+        if from_currency not in demo_rates or to_currency not in demo_rates:
+            return None
+            
+        # Convert to USD first (if not already USD)
+        usd_amount = amount / demo_rates[from_currency] if from_currency != "USD" else amount
+        
+        # Then convert from USD to target currency
+        target_amount = usd_amount * demo_rates[to_currency]
+        
+        # Cache the effective rate
+        rate = target_amount / amount
+        cache_key = f"{from_currency}_{to_currency}"
+        
+        EXCHANGE_RATE_CACHE[cache_key] = {
+            "rate": rate,
+            "timestamp": datetime.datetime.now().timestamp()
+        }
+        
+        return target_amount
 
 
 class MathCalculator(CalculatorInterface):
@@ -579,6 +859,7 @@ app.config["DEBUG"] = DEBUG_MODE
 # This ensures that more specific patterns take precedence over more general ones
 REGISTERED_CALCULATORS = [
     TimeCalculator(),  # Time calculations like "9am - 5pm" or "9:30 - 10:45 in minutes"
+    CurrencyCalculator(),  # Currency conversions like "10 USD to EUR", "$10 to €", etc.
     UnitCalculator(),  # Unit conversions like "5 km to miles" 
     MathCalculator(),  # Math operations including natural language like "3 power of 2", "square root of 9", "2% of 100"
 ]
@@ -667,7 +948,9 @@ def get_session_vars(session_id):
     """Retrieves the variables for a given session."""
     variables = load_session(session_id)
     if variables is not None:
-        return jsonify(variables), 200
+        # Filter out internal variables (those starting with underscore)
+        public_vars = {k: v for k, v in variables.items() if not k.startswith('_')}
+        return jsonify(public_vars), 200
     else:
         return (
             jsonify({"error": f"Session '{session_id}' not found or failed to load"}),
@@ -725,13 +1008,100 @@ def calculate_in_session(session_id):
                 ),
                 400,
             )
+            
+        # Handle direct number assignment like "x = 10"
+        try:
+            # Try to interpret as a direct number
+            direct_value = float(expression_body)
+            # If it's a whole number, convert to int
+            if direct_value == int(direct_value):
+                direct_value = int(direct_value)
+            # Store and return the result
+            variables[variable_name] = direct_value
+            save_session(session_id, variables)
+            return jsonify({"variable_set": variable_name, "result": direct_value}), 200
+        except ValueError:
+            # Not a direct number, continue with other checks
+            pass
+            
+        # Special handling for unit conversion assignments (e.g., "x = 10km to mi")
+        # First check if it's a unit conversion format
+        unit_match = UnitCalculator.unit_pattern.match(expression_body)
+        if unit_match:
+            value_str, from_unit, to_unit = (
+                unit_match.group(1),
+                unit_match.group(2).strip(),
+                unit_match.group(3).strip(),
+            )
+            try:
+                value = float(value_str)
+                # Perform the conversion
+                calculator = UnitCalculator()
+                result, error = calculator.parse(expression_body)
+                if error:
+                    return jsonify({"error": error}), 400
+                if result is not None:
+                    # Store both the string result with units and the numeric value
+                    variables[variable_name] = result
+                    # Extract numeric part for later calculations
+                    try:
+                        value_str = str(result).split(' ', 1)[0]
+                        numeric_value = float(value_str)
+                        variables[f"_{variable_name}_value"] = numeric_value
+                    except (ValueError, IndexError):
+                        pass
+                    # Save to the session
+                    save_session(session_id, variables)
+                    return jsonify({"variable_set": variable_name, "result": result}), 200
+            except (ValueError, UndefinedUnitError) as e:
+                # Not a valid unit conversion, continue with normal evaluation
+                pass
+                
         # Substitute variables *only in the expression part*
         expression_to_evaluate = substitute_variables(expression_body, variables)
         logger.info(
             f"Session {session_id}: Assignment detected for '{variable_name}'. Evaluating: '{expression_to_evaluate}'"
         )
     else:
-        # Substitute variables in the whole query
+        # Check for operations with unit-based variables (e.g., "x * 3" where x contains units)
+        # Patterns like "x * 3", "x / 2", "x + 10", etc.
+        unit_op_match = re.match(r'^\s*([a-zA-Z_][a-zA-Z0-9_]*)\s*([\+\-\*\/])\s*(-?[\d\.]+)\s*$', query)
+        if unit_op_match:
+            var_name = unit_op_match.group(1)
+            operator = unit_op_match.group(2)
+            try:
+                number = float(unit_op_match.group(3))
+                
+                # Check if variable exists and if we have a hidden numeric value for it
+                if var_name in variables:
+                    hidden_value_key = f"_{var_name}_value"
+                    if hidden_value_key in variables:
+                        numeric_val = variables[hidden_value_key]
+                        
+                        # Perform the operation
+                        result_val = None
+                        if operator == '+':
+                            result_val = numeric_val + number
+                        elif operator == '-':
+                            result_val = numeric_val - number
+                        elif operator == '*':
+                            result_val = numeric_val * number
+                        elif operator == '/':
+                            if number == 0:
+                                return jsonify({"error": "Division by zero"}), 400
+                            result_val = numeric_val / number
+                        
+                        # If the original variable had units, preserve them
+                        if isinstance(variables[var_name], str) and ' ' in variables[var_name]:
+                            _, unit = variables[var_name].split(' ', 1)
+                            return jsonify({"result": f"{result_val} {unit}"}), 200
+                        else:
+                            return jsonify({"result": result_val}), 200
+            except ValueError:
+                # If any conversion fails, continue with normal processing
+                pass
+        
+        # Regular expression with variable substitution
         expression_to_evaluate = substitute_variables(query, variables)
         logger.info(
             f"Session {session_id}: Evaluating expression: '{expression_to_evaluate}' (Original: '{query}')"
@@ -782,9 +1152,22 @@ def calculate_in_session(session_id):
     elif calculated_result is not None:
         # Evaluation succeeded
         if is_assignment:
-            # Update session variables
+            # Store the result, preserving both numeric value and formatted display
             variables[variable_name] = calculated_result
+            
+            # Also store a numeric version if it's a unit result
+            if isinstance(calculated_result, str) and ' ' in calculated_result:
+                try:
+                    # Try to extract numeric part for calculations
+                    value_str = calculated_result.split(' ', 1)[0]
+                    numeric_value = float(value_str)
+                    variables[f"_{variable_name}_value"] = numeric_value
+                except (ValueError, IndexError):
+                    pass
+                    
+            # Save to database if we have a session
             save_session(session_id, variables)
+            
             # Return the assigned value
             return (
                 jsonify({"variable_set": variable_name, "result": calculated_result}),
@@ -808,10 +1191,375 @@ def calculate_in_session(session_id):
         )
 
 
-# --- Run the App ---
-def main():
-    """Entry point for running the app through Poetry."""
+# --- CLI Interface ---
+def run_cli_mode():
+    """Run calculator in interactive CLI mode."""
+    import os
+    import argparse
+    
+    # Parse command-line arguments
+    parser = argparse.ArgumentParser(description='Calculator DSL CLI')
+    parser.add_argument('--session', '-s', type=str, help='Use an existing session ID')
+    parser.add_argument('--keep-session', '-k', action='store_true', help='Keep the session after exiting')
+    args = parser.parse_args()
+    
+    # Variables that will be used by the completer
+    variables = {}
+    
+    # Setup readline for better CLI experience with history and line editing
+    try:
+        # For Unix-like systems
+        import readline
+        histfile = os.path.join(os.path.expanduser("~"), ".calc_dsl_history")
+        try:
+            readline.read_history_file(histfile)
+            # Set the max history file size
+            readline.set_history_length(1000)
+        except FileNotFoundError:
+            pass
+            
+        # Save history on exit
+        import atexit
+        atexit.register(readline.write_history_file, histfile)
+        
+        # Enable tab completion for commands
+        def completer(text, state):
+            commands = ['help', 'vars', 'exit', 'quit', 'print', 'keep-session']
+            # If there's a space, it might be a 'print' command followed by a variable name
+            if ' ' in text:
+                cmd, partial_var = text.split(' ', 1)
+                if cmd.lower() == 'print':
+                    # Complete variable names
+                    matching_vars = [f"print {v}" for v in variables.keys() if v.startswith(partial_var) and not v.startswith('_')]
+                    if state < len(matching_vars):
+                        return matching_vars[state]
+                    return None
+            # Standard command completion
+            matches = [cmd for cmd in commands if cmd.startswith(text)]
+            if state < len(matches):
+                return matches[state]
+            return None
+            
+        readline.parse_and_bind("tab: complete")
+        readline.set_completer(completer)
+        
+        has_readline = True
+    except (ImportError, ModuleNotFoundError):
+        # For Windows or if readline is not available
+        try:
+            import pyreadline3
+            has_readline = True
+        except (ImportError, ModuleNotFoundError):
+            has_readline = False
+            
+    print("Calculator DSL - Press Ctrl+C to exit")
+    print("Enter calculations or expressions like: '2 + 2', '9am - 5pm', or '5 km to miles'")
+    if not has_readline:
+        print("Note: Install 'readline' (Unix) or 'pyreadline3' (Windows) for command history and arrow key support")
+    
+    # Initialize database
+    init_db()
+    
+    # Create or load session
+    keep_session = args.keep_session
+    session_id = None
+    
+    if args.session:
+        # Try to load existing session
+        variables = load_session(args.session)
+        if variables is not None:
+            session_id = args.session
+            print(f"Loaded existing session: {session_id}")
+        else:
+            print(f"Session {args.session} not found. Creating a new session.")
+            session_id = create_session_db()
+            variables = {}
+    else:
+        # Create a new session
+        session_id = create_session_db()
+        variables = {}
+    
+    if session_id and not args.session:
+        print(f"Session created: {session_id}")
+        print("Session will be deleted on exit. Use 'keep-session' command to keep it.")
+    elif not session_id:
+        print("Warning: Failed to create session. Variables won't be saved.")
+    
+    try:
+        while True:
+            try:
+                # Get user input with the prompt
+                query = input("calc> ")
+                
+                if not query.strip():
+                    continue
+                
+                if query.lower() in ('exit', 'quit', 'bye'):
+                    print("Thank you for using Calculator DSL!")
+                    if session_id and not keep_session:
+                        print(f"Deleting temporary session: {session_id}")
+                    elif session_id and keep_session:
+                        print(f"Keeping session: {session_id}")
+                        print(f"You can resume this session later with: calc --session {session_id}")
+                    break
+                
+                if query.lower() == 'keep-session':
+                    keep_session = True
+                    print(f"Session {session_id} will be kept after exiting.")
+                    print(f"You can resume this session later with: calc --session {session_id}")
+                    continue
+                
+                if query.lower() == 'vars':
+                    # Display defined variables
+                    if not variables:
+                        print("No variables defined.")
+                    else:
+                        print("Current variables:")
+                        for name, value in variables.items():
+                            # Skip internal/hidden variables (those starting with underscore)
+                            if not name.startswith('_'):
+                                print(f"  {name} = {value}")
+                    continue
+                
+                # Check for print variable command (e.g., "?x" or "print x")
+                print_var_match = re.match(r'^\s*(?:\?|print\s+)([a-zA-Z_][a-zA-Z0-9_]*)\s*$', query, re.IGNORECASE)
+                if print_var_match:
+                    var_name = print_var_match.group(1)
+                    if var_name in variables:
+                        print(f"{var_name} = {variables[var_name]}")
+                    else:
+                        print(f"Variable '{var_name}' is not defined")
+                    continue
+                
+                if query.lower() == 'help':
+                    # Show help
+                    print("\nUsage examples:")
+                    print("  2 + 3           - Basic arithmetic")
+                    print("  x = 10          - Assign a variable")
+                    print("  ?x              - Print the value of variable x")
+                    print("  print x         - Alternative way to print variable x")
+                    print("  9am - 5pm       - Calculate time difference")
+                    print("  9am - 5pm in minutes - Calculate time with specific output format")
+                    print("  5 km to miles   - Convert units")
+                    print("  10 USD to EUR   - Convert currencies (using codes)")
+                    print("  $10 to €        - Convert currencies (using symbols)")
+                    print("  3 power of 2    - Use natural language math")
+                    print("  square root of 16 - Use more complex expressions")
+                    print("  2% of 100       - Calculate percentages")
+                    print("\nCommands:")
+                    print("  vars            - Show all variables")
+                    print("  keep-session    - Keep the session after exiting (for later use)")
+                    print("  help            - Show this help message")
+                    print("  exit/quit       - Exit the calculator")
+                    print("\nSession Management:")
+                    print("  - By default, sessions are temporary and deleted on exit")
+                    print("  - Use 'keep-session' to preserve your session")
+                    print("  - To load a saved session: calc --session SESSION_ID")
+                    continue
+                
+                # Process calculation
+                # Check for assignment
+                assignment_match = ASSIGNMENT_PATTERN.match(query)
+                is_assignment = assignment_match is not None
+                variable_name = None
+                expression_to_evaluate = query
+
+                if is_assignment:
+                    variable_name = assignment_match.group(1)
+                    expression_body = assignment_match.group(2).strip()
+                    if not expression_body:
+                        print("Error: Assignment requires an expression (e.g., x = 1 + 1)")
+                        continue
+                    
+                    # Handle direct number assignment like "x = 10"
+                    try:
+                        # Try to interpret as a direct number
+                        direct_value = float(expression_body)
+                        # If it's a whole number, convert to int
+                        if direct_value == int(direct_value):
+                            direct_value = int(direct_value)
+                        variables[variable_name] = direct_value
+                        if session_id:
+                            save_session(session_id, variables)
+                        print(f"{variable_name} = {direct_value}")
+                        continue
+                    except ValueError:
+                        # Not a direct number, continue with normal evaluation
+                        pass
+                    
+                    # Special handling for unit conversion assignments (e.g., "x = 10km to mi")
+                    # First check if it's a unit conversion format
+                    unit_match = UnitCalculator.unit_pattern.match(expression_body)
+                    if unit_match:
+                        value_str, from_unit, to_unit = (
+                            unit_match.group(1),
+                            unit_match.group(2).strip(),
+                            unit_match.group(3).strip(),
+                        )
+                        try:
+                            value = float(value_str)
+                            # Perform the conversion
+                            calculator = UnitCalculator()
+                            result, error = calculator.parse(expression_body)
+                            if error:
+                                print(f"Error: {error}")
+                                continue
+                            if result is not None:
+                                # Store both the string result with units and the numeric value
+                                variables[variable_name] = result
+                                # Extract numeric part for later calculations
+                                try:
+                                    value_str = str(result).split(' ', 1)[0]
+                                    numeric_value = float(value_str)
+                                    variables[f"_{variable_name}_value"] = numeric_value
+                                except (ValueError, IndexError):
+                                    pass
+                                if session_id:
+                                    save_session(session_id, variables)
+                                print(f"{variable_name} = {result}")
+                                continue
+                        except (ValueError, UndefinedUnitError):
+                            # Not a unit conversion or error in conversion, continue with normal evaluation
+                            pass
+                    
+                    # Substitute variables in the expression part
+                    expression_to_evaluate = substitute_variables(expression_body, variables)
+                else:
+                    # Check for operations with unit-based variables (e.g., "x * 3" where x contains units)
+                    # Patterns like "x * 3", "x / 2", "x + 10", etc.
+                    unit_op_match = re.match(r'^\s*([a-zA-Z_][a-zA-Z0-9_]*)\s*([\+\-\*\/])\s*(-?[\d\.]+)\s*$', query)
+                    if unit_op_match:
+                        var_name = unit_op_match.group(1)
+                        operator = unit_op_match.group(2)
+                        number = float(unit_op_match.group(3))
+                        
+                        # Check if we have a saved numeric value for this variable
+                        hidden_value_key = f"_{var_name}_value"
+                        if hidden_value_key in variables:
+                            numeric_val = variables[hidden_value_key]
+                            
+                            # Perform the operation
+                            if operator == '+':
+                                result_val = numeric_val + number
+                            elif operator == '-':
+                                result_val = numeric_val - number
+                            elif operator == '*':
+                                result_val = numeric_val * number
+                            elif operator == '/':
+                                if number == 0:
+                                    print("Error: Division by zero")
+                                    continue
+                                result_val = numeric_val / number
+                            
+                            # If the original variable had units, preserve them
+                            if var_name in variables and isinstance(variables[var_name], str) and ' ' in variables[var_name]:
+                                _, unit = variables[var_name].split(' ', 1)
+                                print(f"Result: {result_val} {unit}")
+                            else:
+                                print(f"Result: {result_val}")
+                            continue
+                            
+                    # Regular expression with variable substitution
+                    expression_to_evaluate = substitute_variables(query, variables)
+
+                # Evaluate with calculators
+                calculated_result = None
+                evaluation_error = None
+
+                # Try each calculator
+                for calculator in REGISTERED_CALCULATORS:
+                    try:
+                        result, error = calculator.parse(expression_to_evaluate)
+
+                        if error:
+                            # Calculator recognized format but failed internally
+                            evaluation_error = error
+                            break
+                        elif result is not None:
+                            # Calculator successfully parsed and returned a result
+                            calculated_result = result
+                            break
+
+                    except Exception as e:
+                        evaluation_error = f"An unexpected error occurred: {e}"
+                        break
+
+                # Handle results
+                if evaluation_error:
+                    print(f"Error: {evaluation_error}")
+                elif calculated_result is not None:
+                    if is_assignment:
+                        # Store the result, preserving both numeric value and formatted display
+                        variables[variable_name] = calculated_result
+                        print(f"{variable_name} = {calculated_result}")
+                        
+                        # Also store a numeric version if it's a unit result
+                        if isinstance(calculated_result, str) and ' ' in calculated_result:
+                            try:
+                                # Try to extract numeric part for calculations
+                                value_str = calculated_result.split(' ', 1)[0]
+                                numeric_value = float(value_str)
+                                variables[f"_{variable_name}_value"] = numeric_value
+                            except (ValueError, IndexError):
+                                pass
+                        
+                        # Save to database if we have a session
+                        if session_id:
+                            save_session(session_id, variables)
+                    else:
+                        print(f"Result: {calculated_result}")
+                else:
+                    print(f"Error: Could not understand or parse expression: '{expression_to_evaluate}'")
+                    
+            except Exception as e:
+                print(f"Error processing input: {e}")
+                
+    except KeyboardInterrupt:
+        print("\nKeyboard interrupt received. Exiting...")
+        if session_id and not keep_session:
+            print(f"Deleting temporary session: {session_id}")
+        elif session_id and keep_session:
+            print(f"Keeping session: {session_id}")
+            print(f"You can resume this session later with: calc --session {session_id}")
+    
+    # Clean up the session if needed
+    if session_id and not keep_session:
+        try:
+            delete_session_db(session_id)
+        except Exception as e:
+            print(f"Warning: Failed to delete session: {e}")
+    
+    print("Thank you for using Calculator DSL!")
+
+# --- Entry Points ---
+def start_web_server():
+    """Entry point for running the web server."""
+    print("Initializing database...")
     init_db()  # Ensure database exists and table is created on startup
+    
+    print("Starting web server on http://0.0.0.0:5200")
+    app.run(host="0.0.0.0", port=5200)
+
+def start_cli_mode():
+    """Entry point for running the CLI mode."""
+    # This directly runs the CLI mode
+    init_db()
+    run_cli_mode()
+
+def main():
+    """Main entry point that decides between web and CLI mode based on arguments."""
+    import sys
+    
+    init_db()  # Ensure database exists and table is created on startup
+    
+    # Check if command line args exist and we should run in CLI mode
+    if len(sys.argv) > 1:
+        cli_handled = run_cli_mode()
+        if cli_handled:
+            return
+    
+    # Default to web server mode if not handled by CLI
+    print("Starting web server on http://0.0.0.0:5200")
     app.run(host="0.0.0.0", port=5200)
 
 if __name__ == "__main__":

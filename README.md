@@ -163,7 +163,7 @@ $10 to €                   → 8.50 EUR
 ### Derived Unit Conversions
 ```
 x = $2/ml                  → 2 USD/ml
-given x; find 10oz in dollar → 590.59 USD  (10 fluid ounces at $2/ml)
+given x; find 10fluid_ounce in dollar → 590.59 USD  (10 fluid ounces at $2/ml)
 y = 5 EUR/km               → 5 EUR/km
 given y; find 10miles in euro → 80.47 EUR  (10 miles at 5 EUR/km)
 ```

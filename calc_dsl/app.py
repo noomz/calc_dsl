@@ -563,16 +563,26 @@ class DerivedUnitCalculator(CalculatorInterface):
                 
             rate_value, rate_currency, rate_unit = rate_match.groups()
             rate_value = float(rate_value)
+            rate_unit = rate_unit.strip()
+            
+            # Special handling for fluid ounces
+            normalized_from_unit = from_unit.strip().lower()
+            if normalized_from_unit in ["oz", "ounce", "ounces"] and rate_unit.lower() in ["ml", "milliliter", "milliliters"]:
+                # Assume fluid ounces for volume conversion
+                normalized_from_unit = "fluid_ounce"
             
             # Convert the input value from its units to the rate's units
             # This creates a quantity with the input units
             try:
-                quantity = self.Q_(value, from_unit)
+                quantity = self.Q_(value, normalized_from_unit)
                 # Convert to the rate's units
                 quantity_in_rate_units = quantity.to(rate_unit)
                 # Get the magnitude in the rate's units
                 amount_in_rate_units = quantity_in_rate_units.magnitude
             except Exception as e:
+                # If conversion failed, provide a more helpful error message
+                if normalized_from_unit in ["oz", "ounce", "ounces"]:
+                    return None, f"Unit conversion error: For volume conversions, please use 'fluid_ounce' or 'fl_oz' instead of 'oz'."
                 return None, f"Unit conversion error: {e}"
             
             # Calculate the currency amount based on the rate
@@ -581,11 +591,11 @@ class DerivedUnitCalculator(CalculatorInterface):
             # If the currency in the rate is different from the target currency, convert it
             if rate_currency != to_currency:
                 # Attempt currency conversion
-                conversion_result, error = self.currency_calculator._convert_currency(
+                conversion_result = self.currency_calculator._convert_currency(
                     currency_amount, rate_currency, to_currency
                 )
-                if error:
-                    return None, error
+                if conversion_result is None:
+                    return None, f"Could not convert from {rate_currency} to {to_currency}"
                 currency_amount = conversion_result
             
             # Format output: "X.XX CURRENCY"
@@ -1605,7 +1615,7 @@ def run_cli_mode():
                     print("  10 USD to EUR   - Convert currencies (using codes)")
                     print("  $10 to €        - Convert currencies (using symbols)")
                     print("  x = $2/ml       - Set a derived unit rate")
-                    print("  given x; find 10oz in dollar - Convert using derived unit rate")
+                    print("  given x; find 10fluid_ounce in dollar - Convert using derived unit rate")
                     print("  3 power of 2    - Use natural language math")
                     print("  square root of 16 - Use more complex expressions")
                     print("  2% of 100       - Calculate percentages")

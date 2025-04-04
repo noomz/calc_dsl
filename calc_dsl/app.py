@@ -407,6 +407,13 @@ class DerivedUnitCalculator(CalculatorInterface):
         re.IGNORECASE
     )
     
+    # Alternative pattern for when variable substitution has occurred: "given 2 USD/ml; find 10oz in dollar"
+    # Captures: rate_value, rate_currency, rate_unit, value, unit, currency
+    substituted_conversion_pattern = re.compile(
+        r"^\s*given\s+([\d\.\-]+)\s+([A-Z]{3})\/([^;]+);\s*find\s+([\d\.\-]+)\s*([\w\s]+?)\s+in\s+([\w\s]+?)\s*$",
+        re.IGNORECASE
+    )
+    
     # Currency symbols to codes mapping
     currency_symbols = {
         "$": "USD",
@@ -497,6 +504,37 @@ class DerivedUnitCalculator(CalculatorInterface):
                 }, None
             except ValueError:
                 return None, f"Invalid number '{value_str}' in derived unit conversion."
+        
+        # Check for the substituted conversion pattern (after variable substitution)
+        # Example: "given 2 USD/ml; find 10oz in dollar"
+        match = self.substituted_conversion_pattern.match(query)
+        if match:
+            rate_value_str, rate_currency, rate_unit, value_str, from_unit, to_currency = match.groups()
+            
+            # Normalize currency name to code
+            if to_currency.lower() in self.currency_names:
+                to_currency_code = self.currency_names[to_currency.lower()]
+            else:
+                to_currency_code = to_currency.upper()
+                
+            try:
+                rate_value = float(rate_value_str)
+                value = float(value_str)
+                
+                # Create a rate string that can be processed directly
+                rate_str = f"{rate_value} {rate_currency}/{rate_unit.strip()}"
+                
+                # Process the conversion directly since we have all the information
+                return self.process_derived_conversion(
+                    rate_info=rate_str,
+                    value=value,
+                    from_unit=from_unit.strip(),
+                    to_currency=to_currency_code
+                )
+            except ValueError as e:
+                return None, f"Invalid number in derived unit conversion: {e}"
+            except Exception as e:
+                return None, f"Error processing derived unit conversion: {e}"
         
         return None, None
         
